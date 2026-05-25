@@ -6,7 +6,11 @@ from typing import Optional
 from bleak import BleakClient, BleakScanner
 from bleak.backends.scanner import AdvertisementData
 from bleak.backends.device import BLEDevice
-from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
+# In MacOS capture exception trying Linux library import and set a flag
+try:
+    from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
+except ImportError:
+    BleakClientBlueZDBus = None
 from catprinter import logger
 
 # For some reason, bleak reports the 0xaf30 service on my macOS, while it reports
@@ -99,7 +103,8 @@ async def run_ble(data, device: Optional[str]):
     async with BleakClient(address) as client:
         # XXX: BlueZ incorrectly reports a fixed MTU of 23; force MTU negotiation manually.
         # https://bleak.readthedocs.io/en/latest/api/client.html#bleak.BleakClient.mtu_size
-        if isinstance(client, BleakClientBlueZDBus):
+        # Only use this library on Linux, not MacOS
+        if BleakClientBlueZDBus and isinstance(client, BleakClientBlueZDBus):
             await client._acquire_mtu()
 
         logger.info(f"✅ Connected: {client.is_connected}; MTU: {client.mtu_size}")
