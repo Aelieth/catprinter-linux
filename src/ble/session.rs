@@ -15,7 +15,7 @@ use crate::ble::seqpacket::SeqPacket;
 use crate::config::NotifyMode;
 use crate::models::{self, Caps, Family};
 use crate::printer::PrintError;
-use crate::protocol::mxw01::{CONNECT_ATTEMPTS, CONNECT_TIMEOUT_S};
+use crate::protocol::mxw01::CONNECT_TIMEOUT_S;
 use crate::protocol::{CONTROL_UUID, DATA_UUID, NOTIFY_UUID, SERVICE_UUIDS};
 
 const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,10 +78,14 @@ impl Session {
     }
 
     /// Connect to a discovered candidate and bind everything. `forced` overrides model detection.
+    /// `attempts`: 3 for a device that is advertising (scan) or Settings-held (Connected), 1 for a
+    /// merely-cached entry that may be stale (each timeout costs CONNECT_TIMEOUT_S).
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         conn: &Connection,
         target: &Candidate,
         was_connected: bool,
+        attempts: u8,
         forced: Option<Family>,
         notify_mode: NotifyMode,
         pacing_ms: u64,
@@ -89,7 +93,7 @@ impl Session {
     ) -> Result<Session, PrintError> {
         let dev = bluez::device_proxy(conn, &target.path).await?;
         let weak = target.rssi.is_some_and(|r| r < -80);
-        connect_with_retries(&dev, was_connected, weak).await?;
+        connect_with_retries(&dev, was_connected, attempts.max(1), weak).await?;
         wait_services_resolved(conn, &dev).await?;
 
         // Resolve characteristics from the object tree under this device.
@@ -304,11 +308,9 @@ impl Drop for Session {
 async fn connect_with_retries(
     dev: &Device1Proxy<'static>,
     was_connected: bool,
+    attempts: u8,
     weak: bool,
 ) -> Result<(), PrintError> {
-    // A live "Connected" cache entry (Settings-held) is worth the full 3 tries; a merely-cached
-    // stale entry only 1 (each timeout costs CONNECT_TIMEOUT_S).
-    let attempts = if was_connected { CONNECT_ATTEMPTS } else { 1 };
     let mut last = String::new();
     for attempt in 1..=attempts {
         match tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_S), dev.connect()).await {

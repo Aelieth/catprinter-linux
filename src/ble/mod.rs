@@ -12,6 +12,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
+
+use crate::protocol::mxw01::CONNECT_ATTEMPTS;
 use zbus::Connection;
 
 use crate::ble::discovery::{Candidate, DeviceHint};
@@ -66,10 +68,13 @@ impl BlePrinter {
                 percent: 0,
                 message: "Connecting".into(),
             });
+            // Settings-held (Connected) → full retries; merely cached → one quick try, then scan.
+            let attempts = if was_connected { CONNECT_ATTEMPTS } else { 1 };
             match Session::connect(
                 conn,
                 best,
                 was_connected,
+                attempts,
                 self.forced_family,
                 notify_mode,
                 self.pacing_ms,
@@ -105,6 +110,7 @@ impl BlePrinter {
             conn,
             &target,
             false,
+            CONNECT_ATTEMPTS,
             self.forced_family,
             notify_mode,
             self.pacing_ms,
