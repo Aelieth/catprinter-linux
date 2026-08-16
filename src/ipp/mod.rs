@@ -448,13 +448,14 @@ impl IppService {
             .filter(|a| a.as_str() != "flash")
             .cloned()
             .collect();
+        self.engine.identify();
         if !bad.is_empty() {
+            // We only know how to "flash" (feed a bit of paper); substitute and say so.
             let mut r = Resp::new(
                 req.version,
-                Status::ClientErrorAttributesOrValuesNotSupported,
+                Status::SuccessfulOkIgnoredOrSubstitutedAttributes,
                 req.request_id,
-            )
-            .status_message("identify action not supported");
+            );
             r.add(
                 Group::UnsupportedAttributes,
                 "identify-actions",
@@ -462,7 +463,6 @@ impl IppService {
             );
             return r;
         }
-        self.engine.identify();
         Resp::new(req.version, Status::SuccessfulOk, req.request_id)
     }
 
@@ -1278,7 +1278,7 @@ mod tests {
             std_ops(vec![("identify-actions", v_kw("sound"))]),
             b"",
         ));
-        assert_eq!(status_of(&out.body), 0x040B);
+        assert_eq!(status_of(&out.body), 0x0001);
         let out = svc.handle(build_req(
             0x0101,
             OP_IDENTIFY_PRINTER,

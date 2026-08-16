@@ -20,7 +20,7 @@ path = "src/main.rs"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "io-util", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "http1"] }
 http = "1"
 http-body-util = "0.1"
 bytes = "1"

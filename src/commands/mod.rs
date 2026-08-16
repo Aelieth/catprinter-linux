@@ -4,8 +4,10 @@ use std::path::Path;
 
 use crate::config::{BleArgs, CheckArgs, EnsureQueueArgs, PrintArgs, ServeArgs};
 
+pub mod serve;
+
 pub async fn serve(args: ServeArgs) -> i32 {
-    match crate::http::serve(args).await {
+    match serve::run(args).await {
         Ok(()) => 0,
         Err(e) => {
             tracing::error!("{e:#}");

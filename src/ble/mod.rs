@@ -31,3 +31,12 @@ impl BlePrinter {
         Err(PrintError::Bus("BLE transport not implemented yet".into()))
     }
 }
+
+/// Periodically report adapter state into /health (stub until the BLE milestone).
+pub async fn adapter_probe_task(
+    _adapter: Option<String>,
+    _extra: std::sync::Arc<std::sync::RwLock<serde_json::Value>>,
+    shutdown: CancellationToken,
+) {
+    shutdown.cancelled().await;
+}
