@@ -89,7 +89,7 @@ fn dechunk(mut b: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub async fn queue_uuid(queue: &str, our_port: u16) -> anyhow::Result<Option<(String, String)>> {
     // 1) by name
     let uri = format!("ipp://localhost/printers/{queue}");
-    let req = ReqBuilder::new(ipp::model::Operation::GetPrinterAttributes, &uri)
+    let req = ReqBuilder::new(ipp::model::Operation::GetPrinterAttributes, &uri)?
         .add(
             Group::OperationAttributes,
             "requesting-user-name",
@@ -109,7 +109,7 @@ pub async fn queue_uuid(queue: &str, our_port: u16) -> anyhow::Result<Option<(St
         }
     }
     // 2) any queue pointing at our port
-    let req = ReqBuilder::new(ipp::model::Operation::CupsGetPrinters, "ipp://localhost/")
+    let req = ReqBuilder::new(ipp::model::Operation::CupsGetPrinters, "ipp://localhost/")?
         .add(
             Group::OperationAttributes,
             "requesting-user-name",

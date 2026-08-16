@@ -183,20 +183,40 @@ pub fn peek_header(bytes: &[u8]) -> Option<(u16, u16, i32)> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// value constructors (infallible; our own strings are always well within limits — truncate defensively)
+// value constructors (infallible). Strings are truncated to the IPP limit on a UTF-8 char boundary:
+// the crate's `new_truncated` is `String::truncate(MAX)`, which panics inside a multi-byte char, and
+// several of these strings are client-controlled (job-name, document-format …) or config
+// (--location), so a plain truncate would let a print job or an env line take the daemon down.
+
+/// Longest prefix of `s` that is at most `max` bytes and ends on a char boundary.
+pub fn utf8_prefix(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn bounded<const N: usize>(s: &str) -> ipp::value::BoundedString<N> {
+    ipp::value::BoundedString::<N>::new_truncated(utf8_prefix(s, N))
+}
 
 fn name(s: &str) -> IppName {
-    IppName::new_truncated(s)
+    bounded(s)
 }
 pub fn v_kw(s: &str) -> IppValue {
-    IppValue::Keyword(ipp::value::IppKeyword::new_truncated(s))
+    IppValue::Keyword(bounded(s))
 }
 pub fn v_name(s: &str) -> IppValue {
-    IppValue::NameWithoutLanguage(IppName::new_truncated(s))
+    IppValue::NameWithoutLanguage(bounded(s))
 }
 pub fn v_text(s: &str) -> IppValue {
-    let t = IppTextValue::new(s)
-        .unwrap_or_else(|_| IppTextValue::new(s.chars().take(1000).collect::<String>()).unwrap());
+    // ≤ 1023 bytes on a char boundary always constructs (Short ≤ 255, Long ≤ 1023).
+    let t = IppTextValue::new(utf8_prefix(s, 1023))
+        .unwrap_or_else(|_| IppTextValue::new("").expect("empty text is valid"));
     IppValue::TextWithoutLanguage(t)
 }
 pub fn v_int(i: i32) -> IppValue {
@@ -209,16 +229,16 @@ pub fn v_bool(b: bool) -> IppValue {
     IppValue::Boolean(b)
 }
 pub fn v_uri(s: &str) -> IppValue {
-    IppValue::Uri(ipp::value::IppString::new_truncated(s))
+    IppValue::Uri(bounded(s))
 }
 pub fn v_mime(s: &str) -> IppValue {
-    IppValue::MimeMediaType(ipp::value::IppMimeMediaType::new_truncated(s))
+    IppValue::MimeMediaType(bounded(s))
 }
 pub fn v_charset(s: &str) -> IppValue {
-    IppValue::Charset(ipp::value::IppCharset::new_truncated(s))
+    IppValue::Charset(bounded(s))
 }
 pub fn v_lang(s: &str) -> IppValue {
-    IppValue::NaturalLanguage(ipp::value::IppLanguage::new_truncated(s))
+    IppValue::NaturalLanguage(bounded(s))
 }
 pub fn v_range(min: i32, max: i32) -> IppValue {
     IppValue::RangeOfInteger { min, max }
@@ -386,10 +406,12 @@ pub struct ReqBuilder {
 }
 
 impl ReqBuilder {
-    pub fn new(op: ipp::model::Operation, printer_uri: &str) -> Self {
+    /// Fails only when `printer_uri` cannot be represented (e.g. longer than the IPP string limit).
+    pub fn new(op: ipp::model::Operation, printer_uri: &str) -> Result<Self, CodecError> {
         let uri: Option<http::Uri> = printer_uri.parse().ok();
-        let inner = IppRequestResponse::new(IppVersion::v2_0(), op, uri).expect("valid request");
-        ReqBuilder { inner }
+        let inner = IppRequestResponse::new(IppVersion::v2_0(), op, uri)
+            .map_err(|e| CodecError::Parse(format!("request for {printer_uri}: {e}")))?;
+        Ok(ReqBuilder { inner })
     }
     pub fn add(mut self, group: Group, attr_name: &str, value: IppValue) -> Self {
         self.inner
@@ -538,5 +560,47 @@ mod tests {
         );
         assert_eq!(&req.payload[..], b"RaS2payload");
         assert_eq!(req.first_group_tag(), Some(Group::OperationAttributes));
+    }
+
+    #[test]
+    fn truncation_is_char_boundary_safe() {
+        // 2-byte chars: byte 255 / 1023 fall inside a char — the crate's own truncate would panic.
+        let e = "é".repeat(600); // 1200 bytes
+        for v in [
+            v_name(&e),
+            v_kw(&e),
+            v_mime(&e),
+            v_charset(&e),
+            v_lang(&e),
+            v_uri(&e),
+        ] {
+            let s = value_to_string(&v).unwrap();
+            assert!(!s.is_empty());
+            assert!(s.len() <= 1023, "{}", s.len());
+            assert!(s.chars().all(|c| c == 'é'));
+        }
+        assert!(value_to_string(&v_name(&e)).unwrap().len() <= 255);
+        // 3-byte chars through v_text: never more than 1023 bytes, always whole chars
+        let dash = "—".repeat(500); // 1500 bytes
+        let t = value_to_string(&v_text(&dash)).unwrap();
+        assert!(t.len() <= 1023 && t.len() >= 1020, "{}", t.len());
+        assert!(t.chars().all(|c| c == '—'));
+        // short strings pass through untouched; the attribute name is bounded too
+        assert_eq!(value_to_string(&v_text("héllo")).unwrap(), "héllo");
+        let _ = name(&e);
+        assert_eq!(utf8_prefix("aé", 2), "a");
+        assert_eq!(utf8_prefix("aé", 3), "aé");
+        assert_eq!(utf8_prefix("", 0), "");
+    }
+
+    #[test]
+    fn req_builder_rejects_huge_uri() {
+        let uri = format!("ipp://localhost/printers/{}", "q".repeat(2000));
+        assert!(ReqBuilder::new(ipp::model::Operation::GetPrinterAttributes, &uri).is_err());
+        assert!(ReqBuilder::new(
+            ipp::model::Operation::GetPrinterAttributes,
+            "ipp://localhost/p"
+        )
+        .is_ok());
     }
 }

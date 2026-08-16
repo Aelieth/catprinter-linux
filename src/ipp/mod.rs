@@ -83,18 +83,35 @@ impl IppService {
     }
 
     /// Handle one IPP request body; always returns an IPP response (or a 400 for garbage).
+    ///
+    /// Panics are contained here: a panic while *parsing* (the `ipp` crate slices some
+    /// language-tagged values unchecked) is a malformed request → `client-error-bad-request`; a
+    /// panic while *dispatching* is our bug → `server-error-busy`, which the CUPS backend merely
+    /// retries after a pause (it would STOP the queue on `not-found`, downgrade the protocol on
+    /// `bad-request`, or mark the job completed on `internal-error`).
     pub fn handle(&self, body: Bytes) -> IppOutcome {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
         let peek = peek_header(&body);
-        let req = match parse(body) {
-            Ok(r) => r,
-            Err(e) => {
+        let (ver, _op, id) = peek.unwrap_or((0x0101, 0, 1));
+        let ver = if matches!(ver >> 8, 1 | 2) {
+            ver
+        } else {
+            0x0101
+        };
+        let parsed = catch_unwind(AssertUnwindSafe(|| parse(body)));
+        let req = match parsed {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 tracing::debug!("bad IPP request: {e}");
-                let (ver, _op, id) = peek.unwrap_or((0x0101, 0, 1));
-                let ver = if matches!(ver >> 8, 1 | 2) {
-                    ver
-                } else {
-                    0x0101
+                let r = Resp::new(ver, Status::ClientErrorBadRequest, id)
+                    .status_message("malformed IPP request");
+                return IppOutcome {
+                    body: r.into_bytes(),
+                    http_status: if peek.is_some() { 200 } else { 400 },
                 };
+            }
+            Err(_) => {
+                tracing::warn!("IPP parser panicked on a malformed request (contained)");
                 let r = Resp::new(ver, Status::ClientErrorBadRequest, id)
                     .status_message("malformed IPP request");
                 return IppOutcome {
@@ -103,7 +120,17 @@ impl IppService {
                 };
             }
         };
-        let resp = self.dispatch(&req);
+        let resp = match catch_unwind(AssertUnwindSafe(|| self.dispatch(&req))) {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::error!(
+                    op = format_args!("0x{:04x}", req.op),
+                    "IPP handler panicked (contained; please report)"
+                );
+                Resp::new(ver, Status::ServerErrorBusy, id)
+                    .status_message("printer service hiccup — please retry")
+            }
+        };
         IppOutcome {
             body: resp.into_bytes(),
             http_status: 200,
@@ -212,41 +239,59 @@ impl IppService {
 
     /// Decompress the payload if `compression` says so.
     fn document_bytes(&self, req: &Request) -> Result<Bytes, Resp> {
+        use std::io::Read;
         let comp = req
             .get_str(Some(Group::OperationAttributes), "compression")
             .unwrap_or_else(|| "none".into());
+        // The CUPS `ipp` backend gzips *every* raster job once gzip is advertised, so this is the
+        // hot path — and an unbounded inflate of a 64 MB body is a multi-GB allocation. Inflate at
+        // most max_document_bytes + 1 and reject anything larger the same way an oversize body is
+        // rejected (the backend cancels the job cleanly on request-value-too-long).
+        let max = self.engine.store().cfg.max_document_bytes;
+        let too_large = || {
+            Resp::new(
+                req.version,
+                Status::ClientErrorRequestValueTooLong,
+                req.request_id,
+            )
+            .status_message("document too large for this printer")
+        };
+        let comp_err = |what: &str, e: std::io::Error| {
+            Resp::new(
+                req.version,
+                Status::ClientErrorCompressionError,
+                req.request_id,
+            )
+            .status_message(&format!("{what}: {e}"))
+        };
+        let inflate = |mut d: Box<dyn Read + '_>| -> Result<Vec<u8>, std::io::Error> {
+            let mut v = Vec::new();
+            d.by_ref().take(max as u64 + 1).read_to_end(&mut v)?;
+            Ok(v)
+        };
         let out = match comp.to_ascii_lowercase().as_str() {
             "none" => req.payload.clone(),
             "gzip" => {
-                use std::io::Read;
-                let mut d = flate2::read::MultiGzDecoder::new(&req.payload[..]);
-                let mut v = Vec::new();
-                d.read_to_end(&mut v).map_err(|e| {
-                    Resp::new(
-                        req.version,
-                        Status::ClientErrorCompressionError,
-                        req.request_id,
-                    )
-                    .status_message(&format!("gzip: {e}"))
-                })?;
+                let v = inflate(Box::new(flate2::read::MultiGzDecoder::new(
+                    &req.payload[..],
+                )))
+                .map_err(|e| comp_err("gzip", e))?;
+                if v.len() > max {
+                    return Err(too_large());
+                }
                 Bytes::from(v)
             }
             "deflate" => {
-                use std::io::Read;
-                let mut d = flate2::read::ZlibDecoder::new(&req.payload[..]);
-                let mut v = Vec::new();
-                if d.read_to_end(&mut v).is_err() {
+                let v = match inflate(Box::new(flate2::read::ZlibDecoder::new(&req.payload[..]))) {
+                    Ok(v) => v,
                     // some clients send raw deflate
-                    let mut d = flate2::read::DeflateDecoder::new(&req.payload[..]);
-                    v.clear();
-                    d.read_to_end(&mut v).map_err(|e| {
-                        Resp::new(
-                            req.version,
-                            Status::ClientErrorCompressionError,
-                            req.request_id,
-                        )
-                        .status_message(&format!("deflate: {e}"))
-                    })?;
+                    Err(_) => inflate(Box::new(flate2::read::DeflateDecoder::new(
+                        &req.payload[..],
+                    )))
+                    .map_err(|e| comp_err("deflate", e))?,
+                };
+                if v.len() > max {
+                    return Err(too_large());
                 }
                 Bytes::from(v)
             }
@@ -1010,9 +1055,12 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn service(dir: &std::path::Path) -> IppService {
+        service_with(dir, EngineConfig::default())
+    }
+
+    fn service_with(dir: &std::path::Path, cfg: EngineConfig) -> IppService {
         let printer = Printer::Fake(FakePrinter::new(dir).unwrap());
-        let (engine, _h) =
-            Engine::start(EngineConfig::default(), printer, CancellationToken::new());
+        let (engine, _h) = Engine::start(cfg, printer, CancellationToken::new());
         let cfg = PrinterConfig {
             name: "CatPrinter".into(),
             info: "Cat Printer".into(),
@@ -1313,5 +1361,155 @@ mod tests {
             b"",
         ));
         assert_eq!(status_of(&out.body), 0x0406);
+    }
+
+    #[tokio::test]
+    async fn long_multibyte_job_name_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path());
+        // job-name as text (≤ 1023 bytes parses fine) but longer than the 255-byte name limit we
+        // echo it with, and every 255-byte cut lands inside a 2-byte char.
+        let long = "é".repeat(400);
+        let raster = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tiny-roll48.pwg"
+        ))
+        .unwrap();
+        let out = svc.handle(build_req(
+            0x0200,
+            OP_PRINT_JOB,
+            21,
+            std_ops(vec![
+                ("requesting-user-name", v_name("kid")),
+                ("job-name", v_text(&long)),
+                ("document-format", v_mime("image/pwg-raster")),
+            ]),
+            &raster,
+        ));
+        assert_eq!(status_of(&out.body), 0x0000);
+        let back = parse(out.body).unwrap();
+        let echoed = back
+            .get_str(Some(Group::JobAttributes), "job-name")
+            .unwrap();
+        assert!(echoed.len() <= 255 && echoed.chars().all(|c| c == 'é'));
+    }
+
+    #[tokio::test]
+    async fn crate_parser_panic_is_contained() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path());
+        // textWithLanguage whose inner language length exceeds the value: the crate slices
+        // unchecked; we must answer bad-request instead of dropping the connection.
+        let mut b = Vec::new();
+        b.extend(0x0200u16.to_be_bytes());
+        b.extend(OP_GET_PRINTER_ATTRIBUTES.to_be_bytes());
+        b.extend(9i32.to_be_bytes());
+        b.push(0x01);
+        for (n, v) in [
+            ("attributes-charset", v_charset("utf-8")),
+            ("attributes-natural-language", v_lang("en")),
+            ("printer-uri", v_uri("ipp://127.0.0.1:8095/ipp/print")),
+        ] {
+            let a = ipp::attribute::IppAttribute::new(ipp::value::IppName::new_truncated(n), v);
+            b.extend(a.to_bytes());
+        }
+        b.push(0x35); // textWithLanguage
+        b.extend((8u16).to_be_bytes());
+        b.extend(b"job-name");
+        b.extend((4u16).to_be_bytes());
+        b.extend([0x00, 0x05, b'e', b'n']); // claims 5 language bytes, has 2
+        b.push(0x03);
+        let out = svc.handle(Bytes::from(b));
+        assert_eq!(out.http_status, 200);
+        assert_eq!(status_of(&out.body), 0x0400);
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn gzip_bomb_is_rejected_with_request_value_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = EngineConfig {
+            max_document_bytes: 1024 * 1024,
+            ..EngineConfig::default()
+        };
+        let svc = service_with(dir.path(), cfg);
+        let bomb = gzip(&vec![0u8; 8 * 1024 * 1024]); // 8 MiB of zeros → a few KiB
+        assert!(bomb.len() < 64 * 1024);
+        let out = svc.handle(build_req(
+            0x0200,
+            OP_PRINT_JOB,
+            31,
+            std_ops(vec![
+                ("compression", v_kw("gzip")),
+                ("document-format", v_mime("image/pwg-raster")),
+            ]),
+            &bomb,
+        ));
+        assert_eq!(status_of(&out.body), 0x0409);
+        // deflate path too
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut e, &vec![0u8; 8 * 1024 * 1024]).unwrap();
+        let z = e.finish().unwrap();
+        let out = svc.handle(build_req(
+            0x0200,
+            OP_PRINT_JOB,
+            32,
+            std_ops(vec![
+                ("compression", v_kw("deflate")),
+                ("document-format", v_mime("image/pwg-raster")),
+            ]),
+            &z,
+        ));
+        assert_eq!(status_of(&out.body), 0x0409);
+    }
+
+    #[tokio::test]
+    async fn gzip_pwg_roundtrip_prints() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path());
+        let raster = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tiny-roll48.pwg"
+        ))
+        .unwrap();
+        let out = svc.handle(build_req(
+            0x0200,
+            OP_PRINT_JOB,
+            41,
+            std_ops(vec![
+                ("compression", v_kw("gzip")),
+                ("document-format", v_mime("image/pwg-raster")),
+            ]),
+            &gzip(&raster),
+        ));
+        assert_eq!(status_of(&out.body), 0x0000);
+        let back = parse(out.body).unwrap();
+        let id = back.get_int(Some(Group::JobAttributes), "job-id").unwrap();
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let out = svc.handle(build_req(
+                0x0200,
+                OP_GET_JOB_ATTRIBUTES,
+                42,
+                std_ops(vec![("job-id", v_int(id))]),
+                b"",
+            ));
+            let back = parse(out.body).unwrap();
+            if back.get_int(Some(Group::JobAttributes), "job-state") == Some(9) {
+                let png = std::fs::read_dir(dir.path())
+                    .unwrap()
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".png"));
+                assert!(png, "fake printer wrote no png");
+                return;
+            }
+        }
+        panic!("gzip job did not complete");
     }
 }
