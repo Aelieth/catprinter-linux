@@ -170,6 +170,17 @@ pub fn parse(body: Bytes) -> Result<Request, CodecError> {
     })
 }
 
+/// `parse` with the crate's own panics contained (it slices some language-tagged values without
+/// a bounds check). A panic is reported as a parse error.
+pub fn parse_contained(body: Bytes) -> Result<Request, CodecError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(body))) {
+        Ok(r) => r,
+        Err(_) => Err(CodecError::Parse(
+            "parser panicked on malformed input".into(),
+        )),
+    }
+}
+
 /// Peek at the header without parsing attributes (for early rejects on oversize bodies).
 pub fn peek_header(bytes: &[u8]) -> Option<(u16, u16, i32)> {
     if bytes.len() < 8 {
