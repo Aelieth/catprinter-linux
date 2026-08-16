@@ -93,6 +93,12 @@ impl Session {
     ) -> Result<Session, PrintError> {
         let dev = bluez::device_proxy(conn, &target.path).await?;
         let weak = target.rssi.is_some_and(|r| r < -80);
+        // If we are cancelled/fail anywhere below, drop the link BlueZ may still be bringing up.
+        let mut guard = ConnectGuard {
+            conn: conn.clone(),
+            path: target.path.clone(),
+            armed: true,
+        };
         connect_with_retries(&dev, was_connected, attempts.max(1), weak).await?;
         wait_services_resolved(conn, &dev).await?;
 
@@ -135,6 +141,7 @@ impl Session {
         let data = acquire_data_path(conn, &data_char_path, row_bytes).await?;
         tracing::info!("MTU {} ({} bytes/write)", data.mtu(), data.max_payload());
 
+        guard.armed = false; // the Session owns the link from here on
         Ok(Session {
             conn: conn.clone(),
             device_path: target.path.clone(),
@@ -296,6 +303,31 @@ impl Drop for Session {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let conn = self.conn.clone();
             let path = self.device_path.clone();
+            handle.spawn(async move {
+                if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
+                    let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
+                }
+            });
+        }
+    }
+}
+
+/// Disconnects the device if the connect phase is abandoned (cancellation, panic, error) before a
+/// `Session` exists to own the link. Disarmed once the Session takes over.
+struct ConnectGuard {
+    conn: Connection,
+    path: String,
+    armed: bool,
+}
+
+impl Drop for ConnectGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let conn = self.conn.clone();
+            let path = self.path.clone();
             handle.spawn(async move {
                 if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
                     let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
