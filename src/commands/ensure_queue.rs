@@ -85,11 +85,14 @@ pub async fn ensure_queue(a: EnsureQueueArgs) -> i32 {
     let (_, v) = run("lpstat", &["-v", &queue]);
     if let Some(dev) = v
         .lines()
+        .filter(|l| l.starts_with("device for "))
         .find_map(|l| l.split_once(": ").map(|(_, d)| d.trim().to_string()))
     {
         if dev != uri {
             println!("• queue {queue} pointed at {dev}; repointing to {uri}");
         }
+    } else {
+        println!("• queue {queue} does not exist yet; creating");
     }
     // lpadmin -m everywhere (cupsd fetches our attributes and generates the PPD)
     let mut last = String::new();

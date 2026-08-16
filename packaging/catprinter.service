@@ -21,6 +21,8 @@ StartLimitIntervalSec=0
 Type=simple
 DynamicUser=yes
 User=catprinter
+# Default (empty) so systemd does not warn when the env file leaves it unset.
+Environment=CATPRINTERD_ARGS=
 EnvironmentFile=-/etc/catprinter/env
 ExecStart=/usr/local/bin/catprinterd serve $CATPRINTERD_ARGS
 Restart=always
