@@ -1,0 +1,50 @@
+[package]
+name = "catprinterd"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.80"
+description = "IPP Everywhere driver for Bluetooth cat printers (MXW01, GB0x/GT01/MX0x/YT01/X5/X6)"
+license = "MIT"
+repository = "https://github.com/Aelieth/catprinter-linux"
+default-run = "catprinterd"
+
+[lib]
+name = "catprinterd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "catprinterd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "io-util", "fs", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+ipp = { version = "7", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nix = { version = "0.29", features = ["fs", "socket"] }
+uuid = { version = "1", features = ["v5", "v4"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
