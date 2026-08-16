@@ -1,0 +1,7 @@
+# Do not enable this file as-is. The installable unit is generated from
+# deploy/catprinter-mxw01d.service.in by deploy/write-user-unit.sh so the
+# tree can live in any directory.
+#
+#   $DEST/write-user-unit.sh
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now catprinter-mxw01d

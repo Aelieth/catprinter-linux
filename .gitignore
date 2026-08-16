@@ -140,3 +140,13 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# catprinter (dev artefacts, never committed)
+/catprinter-preview.png
+/catprinter-preview.pdf
+/catprinter-fix-round*.md
+/tests/out/
+*.pwg
+!/tests/fixtures/*.pwg
+/target/
+/dist/

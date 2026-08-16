@@ -1,0 +1,9 @@
+WHAT THIS FOLDER IS FOR
+=======================
+This is your Documents folder, and it follows you everywhere.
+
+  * It syncs automatically to every computer you log into.
+  * It is also in Nextcloud (web browser and phone), under "NAS Home".
+  * It lives on the home server, so it is included in the backups.
+
+Just save your files in here as normal - there is nothing to set up.
