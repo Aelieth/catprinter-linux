@@ -5,8 +5,12 @@
 # Bluetooth goes through BlueZ on the system D-Bus, which allows any uid — no session needed.
 #
 # Kit install:   /etc/systemd/system/catprinter.service, ExecStart=/usr/local/bin/catprinterd
+#                (install.sh runs `systemctl enable`)
 # Image-baked:   /usr/lib/systemd/system/catprinter.service, ExecStart=/usr/bin/catprinterd
-#                (`make image-files` rewrites the path; 80-catprinter.preset enables it)
+#                (`make image-files` rewrites the path). Enablement is shipped in the image as
+#                /etc/systemd/system/multi-user.target.wants/catprinter.service -> this unit — what
+#                `systemctl enable` at image-build time produces; it works on first boot AND on a
+#                rebase. 80-catprinter.preset covers only true first boots (presets are applied once).
 # Configuration: /etc/catprinter/env (systemd EnvironmentFile syntax, see env.example)
 
 [Unit]
@@ -30,11 +34,14 @@ RestartSec=2s
 RestartSteps=6
 RestartMaxDelaySec=60s
 # Let a long strip finish on SIGTERM (the daemon finishes/cancels the current job, then exits).
-TimeoutStopSec=40s
+# Budget inside the daemon: http drain 5 s + worker <= 25 s + task trackers 5 s + runtime 3 s < 45 s.
+TimeoutStopSec=45s
 KillMode=mixed
 StateDirectory=catprinter
 RuntimeDirectory=catprinter
 UMask=0022
+# Rendering a tape page can scale a thin-stroke image a lot; throttle before the OOM killer does.
+MemoryHigh=768M
 
 # Hardening. Must keep: system D-Bus (AF_UNIX) for BlueZ/Avahi, loopback TCP for cupsd and the
 # uuid adopter (127.0.0.1:631), and reading /etc/machine-id. No PrivateUsers (D-Bus peer creds).

@@ -1,24 +1,31 @@
 name: Release kit
 
-# Tag vX.Y.Z (matching Cargo.toml) → build the kit tarball on an older glibc (ubuntu-22.04) and
-# attach it + SHA256SUMS to a GitHub Release. install.sh --download fetches exactly these files.
+# Tag vX.Y.Z (matching Cargo.toml) → run the whole CI (check + kit built on ubuntu-22.04 + the
+# fleet test against those exact bytes) → attach the tested kit tarball + SHA256SUMS to a GitHub
+# Release. install.sh --download fetches exactly these files; a tag with a `-` (v0.2.1-rc1) becomes a
+# pre-release, so `--download latest` never picks it up.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  kit:
-    name: Build and publish catprinter-kit
-    runs-on: ubuntu-22.04
+  ci:
+    name: CI (check · kit · fleet-test)
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish catprinter-kit
+    runs-on: ubuntu-latest
+    needs: ci
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Check that the tag matches Cargo.toml
         run: |
@@ -30,8 +37,18 @@ jobs:
             *) echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo version $v"; exit 1 ;;
           esac
 
-      - name: Build kit
-        run: make kit
+      # The `dist` artifact is the one the fleet test just booted — publish exactly those bytes.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Show what is published
+        run: |
+          ls -la dist/
+          cat dist/SHA256SUMS
+          echo "VERSION: $(cat dist/catprinter-kit/VERSION)"
+          (cd dist && sha256sum -c SHA256SUMS)
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
@@ -40,3 +57,4 @@ jobs:
             dist/catprinter-kit-*.tar.gz
             dist/SHA256SUMS
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

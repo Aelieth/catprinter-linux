@@ -6,12 +6,19 @@
 #
 # Kit install:   /etc/systemd/system/catprinter-queue.service, ExecStart=/usr/local/bin/catprinterd
 # Image-baked:   /usr/lib/systemd/system/catprinter-queue.service, ExecStart=/usr/bin/catprinterd
+#                Enabled in the image by the shipped multi-user.target.wants/ symlink (`make
+#                image-files`; = `systemctl enable` at build time, effective on first boot and on a
+#                rebase); 80-catprinter.preset additionally covers true first boots.
+# Wants=cups.service on purpose: fleets that disable cups.service in favour of cups.socket still
+# need cupsd up for lpadmin here.
 
 [Unit]
 Description=Ensure the CUPS queue for the cat printer
 Documentation=https://github.com/Aelieth/catprinter-linux
 Wants=cups.service catprinter.service
 After=cups.service catprinter.service network.target
+# Never give up (RestartSec paces the retries): the daemon may still be coming up at boot.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
