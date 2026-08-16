@@ -159,7 +159,17 @@ async fn register_and_watch(
 ) -> anyhow::Result<()> {
     let conn = tokio::time::timeout(Duration::from_secs(5), zbus::Connection::system()).await??;
     let server = AvahiServerProxy::new(&conn).await?;
-    let state = tokio::time::timeout(Duration::from_secs(5), server.get_state()).await??;
+    // At boot Avahi may still be registering its host name; follow it up for a while.
+    let mut state = tokio::time::timeout(Duration::from_secs(5), server.get_state()).await??;
+    let mut waited = 0u32;
+    while state != SERVER_RUNNING && waited < 60 {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        waited += 2;
+        state = tokio::time::timeout(Duration::from_secs(5), server.get_state()).await??;
+    }
     if state != SERVER_RUNNING {
         anyhow::bail!("avahi server state {state}");
     }
