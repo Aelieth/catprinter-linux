@@ -56,7 +56,8 @@ pub async fn inspect(file: &Path) -> i32 {
     }
 }
 
-pub async fn ensure_queue(_args: EnsureQueueArgs) -> i32 {
-    eprintln!("ensure-queue: not implemented yet");
-    2
+pub mod ensure_queue;
+
+pub async fn ensure_queue(args: EnsureQueueArgs) -> i32 {
+    ensure_queue::ensure_queue(args).await
 }

@@ -380,6 +380,28 @@ pub fn civil_from_unix(secs: i64) -> (i32, u8, u8, u8, u8, u8) {
     )
 }
 
+/// Build an IPP *request* (used by the tiny CUPS client in `cupsq`).
+pub struct ReqBuilder {
+    inner: IppRequestResponse,
+}
+
+impl ReqBuilder {
+    pub fn new(op: ipp::model::Operation, printer_uri: &str) -> Self {
+        let uri: Option<http::Uri> = printer_uri.parse().ok();
+        let inner = IppRequestResponse::new(IppVersion::v2_0(), op, uri).expect("valid request");
+        ReqBuilder { inner }
+    }
+    pub fn add(mut self, group: Group, attr_name: &str, value: IppValue) -> Self {
+        self.inner
+            .attributes_mut()
+            .add(group, IppAttribute::new(name(attr_name), value));
+        self
+    }
+    pub fn into_bytes(self) -> Bytes {
+        self.inner.to_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

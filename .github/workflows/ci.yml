@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt · clippy · tests · install.sh · IPP Everywhere
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ipptool + /usr/share/cups/ipptool/*.test come from cups-ipp-utils; no cupsd needed.
+      - name: Install ipptool and shellcheck
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cups-ipp-utils shellcheck
+
+      - name: make check (fmt, clippy -D warnings, tests, install.sh)
+        run: make check
+
+      - name: Build debug binary
+        run: cargo build --locked
+
+      # The compliance gate: run PWG/CUPS's own ipp-everywhere.test against a fake-printer daemon.
+      # A [FAIL] is only tolerated when its test name is listed verbatim in tests/ipptool/allowlist.txt
+      # (one name per line, no comments; the file is empty on purpose — the target is zero failures).
+      - name: IPP Everywhere suite against --fake-printer
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fake
+          ./target/debug/catprinterd serve --port 8096 --fake-printer /tmp/fake --dnssd off --log-level warn &
+          DAEMON=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8096/health >/dev/null 2>&1 && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1:8096/health
+          ipptool -V 2.0 -tI -f tests/fixtures/text-roll48.pwg -d filetype=image/pwg-raster \
+            ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/ipp-everywhere.test | tee ippeve.log
+          rc=0
+          while read -r name; do
+            if ! grep -qxF "$name" tests/ipptool/allowlist.txt; then
+              echo "::error::ipp-everywhere.test FAIL not allowlisted: $name"; rc=1
+            fi
+          done < <(grep '\[FAIL\]' ippeve.log | sed 's/ *\[FAIL\].*//; s/^ *//' || true)
+          for t in get-jobs print-job-and-wait ipp-backend identify-printer create-job validate-job; do
+            ipptool -tv -f tests/fixtures/photo-roll48.pwg -d filetype=image/pwg-raster \
+              ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/$t.test | tee -a ippeve.log | grep -q '\[FAIL\]' && { echo "::error::$t.test failed"; rc=1; } || true
+          done
+          ls -la /tmp/fake
+          kill $DAEMON || true
+          exit $rc
+
+      - name: Upload ipptool log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipptool-log
+          path: ippeve.log
+          if-no-files-found: ignore

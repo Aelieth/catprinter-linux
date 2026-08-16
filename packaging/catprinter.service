@@ -1,0 +1,67 @@
+# catprinterd — IPP Everywhere driver for Bluetooth cat printers (MXW01, GB0x/GT01/MX0x/YT01/X5/X6).
+#
+# Machine-wide system service: one daemon per machine, always on, independent of who is logged in.
+# cupsd talks to it on 127.0.0.1:8095 (see catprinter-queue.service, which creates the CUPS queue).
+# Bluetooth goes through BlueZ on the system D-Bus, which allows any uid — no session needed.
+#
+# Kit install:   /etc/systemd/system/catprinter.service, ExecStart=/usr/local/bin/catprinterd
+# Image-baked:   /usr/lib/systemd/system/catprinter.service, ExecStart=/usr/bin/catprinterd
+#                (`make image-files` rewrites the path; 80-catprinter.preset enables it)
+# Configuration: /etc/catprinter/env (systemd EnvironmentFile syntax, see env.example)
+
+[Unit]
+Description=Cat printer (Bluetooth thermal printer) IPP daemon for CUPS
+Documentation=https://github.com/Aelieth/catprinter-linux
+Wants=bluetooth.service
+After=bluetooth.service network.target
+# Never give up: nobody with sudo is around to `systemctl reset-failed` on a kid's machine.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=catprinter
+EnvironmentFile=-/etc/catprinter/env
+ExecStart=/usr/local/bin/catprinterd serve $CATPRINTERD_ARGS
+Restart=always
+RestartSec=2s
+RestartSteps=6
+RestartMaxDelaySec=60s
+# Let a long strip finish on SIGTERM (the daemon finishes/cancels the current job, then exits).
+TimeoutStopSec=40s
+KillMode=mixed
+StateDirectory=catprinter
+RuntimeDirectory=catprinter
+UMask=0022
+
+# Hardening. Must keep: system D-Bus (AF_UNIX) for BlueZ/Avahi, loopback TCP for cupsd and the
+# uuid adopter (127.0.0.1:631), and reading /etc/machine-id. No PrivateUsers (D-Bus peer creds).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

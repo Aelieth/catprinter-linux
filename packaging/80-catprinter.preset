@@ -1,0 +1,5 @@
+# systemd preset for image-baked installs of catprinterd (uBlue / rpm-ostree custom images).
+# Place at /usr/lib/systemd/system-preset/80-catprinter.preset together with the units in
+# /usr/lib/systemd/system/ and the binary at /usr/bin/catprinterd (see `make image-files`).
+enable catprinter.service
+enable catprinter-queue.service

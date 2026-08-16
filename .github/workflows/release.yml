@@ -1,0 +1,40 @@
+name: Release kit
+
+# Tag vX.Y.Z (matching Cargo.toml) → build the kit tarball on an older glibc (ubuntu-22.04) and
+# attach it + SHA256SUMS to a GitHub Release. install.sh --download fetches exactly these files.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  kit:
+    name: Build and publish catprinter-kit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag matches Cargo.toml
+        run: |
+          set -euo pipefail
+          v="v$(make -s version)"
+          if [ "$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != Cargo version $v"; exit 1
+          fi
+
+      - name: Build kit
+        run: make kit
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/catprinter-kit-*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true

@@ -1,0 +1,26 @@
+# Ensures the CUPS queue for the cat printer exists and points at catprinterd — at every boot,
+# so a wiped /etc/cups or a freshly imaged machine self-heals without an admin.
+#
+# Runs as root because `lpadmin -m everywhere` needs it (kids have no sudo). It only shells out
+# to lpadmin/cupsenable/cupsaccept from the base `cups` package; nothing is layered.
+#
+# Kit install:   /etc/systemd/system/catprinter-queue.service, ExecStart=/usr/local/bin/catprinterd
+# Image-baked:   /usr/lib/systemd/system/catprinter-queue.service, ExecStart=/usr/bin/catprinterd
+
+[Unit]
+Description=Ensure the CUPS queue for the cat printer
+Documentation=https://github.com/Aelieth/catprinter-linux
+Wants=cups.service catprinter.service
+After=cups.service catprinter.service network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/catprinter/env
+ExecStart=/usr/local/bin/catprinterd ensure-queue
+Restart=on-failure
+RestartSec=15s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

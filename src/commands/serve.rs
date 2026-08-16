@@ -73,7 +73,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     // ---- engine
     let render = RenderOptions {
         max_lines_total: args.max_lines,
-        max_lines_per_request: args.max_lines_per_request.min(65535).max(90),
+        max_lines_per_request: args.max_lines_per_request.clamp(90, 65535),
         ..RenderOptions::default()
     };
     let cfg = EngineConfig {
@@ -133,6 +133,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     // ---- side tasks
     let (uuid_tx, uuid_rx) = tokio::sync::watch::channel(uuid.read().unwrap().clone());
+    crate::cupsq::OUR_PORT.store(args.port, std::sync::atomic::Ordering::Relaxed);
     if args.uuid.is_none() {
         let adopt = crate::cupsq::adopt_uuid_task(
             args.queue.clone(),
