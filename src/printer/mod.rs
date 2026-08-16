@@ -72,7 +72,11 @@ pub enum PrintError {
     #[error("Cat printer not found — turn it on and keep it near the computer")]
     NotFound,
     #[error("Could not connect to the cat printer ({last}).{hint}")]
-    ConnectFailed { attempts: u8, last: String, hint: String },
+    ConnectFailed {
+        attempts: u8,
+        last: String,
+        hint: String,
+    },
     #[error("Bluetooth link too small for image data (MTU {mtu}); move the printer closer and try again")]
     MtuTooSmall { mtu: u16 },
     #[error("Connected, but this is not a cat printer we know: {0}")]
@@ -128,7 +132,9 @@ impl PrintError {
     pub fn printer_reasons(&self) -> &'static [&'static str] {
         match self {
             PrintError::NotFound | PrintError::ConnectFailed { .. } => &["connecting-to-device"],
-            PrintError::NoBluetoothd | PrintError::AdapterOff => &["connecting-to-device", "other-error"],
+            PrintError::NoBluetoothd | PrintError::AdapterOff => {
+                &["connecting-to-device", "other-error"]
+            }
             PrintError::Condition(c) => match c.error.as_deref() {
                 Some("no-paper") => &["media-empty-error", "media-needed"],
                 Some("overheated") => &["fuser-over-temp-warning"],

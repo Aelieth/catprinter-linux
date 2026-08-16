@@ -7,7 +7,10 @@ use crate::config::ServeArgs;
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let addr = std::net::SocketAddr::new(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("catprinterd {} listening on http://{addr}/ (stub)", crate::VERSION);
+    tracing::info!(
+        "catprinterd {} listening on http://{addr}/ (stub)",
+        crate::VERSION
+    );
     loop {
         let (mut sock, _) = listener.accept().await?;
         tokio::spawn(async move {

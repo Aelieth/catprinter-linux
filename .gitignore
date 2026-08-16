@@ -150,3 +150,4 @@ cython_debug/
 !/tests/fixtures/*.pwg
 /target/
 /dist/
+/.claude/

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::config::{CheckArgs, EnsureQueueArgs, PrintArgs, ServeArgs, BleArgs};
+use crate::config::{BleArgs, CheckArgs, EnsureQueueArgs, PrintArgs, ServeArgs};
 
 pub async fn serve(args: ServeArgs) -> i32 {
     match crate::http::serve(args).await {

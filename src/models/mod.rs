@@ -1,7 +1,9 @@
 //! Printer model registry + autodetection. Two protocol families share the AE30 GATT service:
-//!   * `Mxw01`   — 22 21 frames, AE01 control / AE02 notify / AE03 bulk data, 4bpp grayscale.
-//!   * `Classic` — 51 78 frames, AE01 for everything (rows included), AE02 notify. GB01/GB02/GB03/
-//!                 GT01/MX05/MX06/MX08/MX09/MX10/MX11/YT01/X5/X6 (upstream rbaron/catprinter set).
+//!
+//! * `Mxw01` — 22 21 frames, AE01 control / AE02 notify / AE03 bulk data, 4bpp grayscale.
+//! * `Classic` — 51 78 frames, AE01 for everything (rows included), AE02 notify.
+//!   GB01/GB02/GB03/GT01/MX05/MX06/MX08/MX09/MX10/MX11/YT01/X5/X6 (upstream rbaron/catprinter set).
+//!
 //! Detection: advertised name → registry; unknown name + AE03 present ⇒ Mxw01, else Classic.
 
 pub mod classic;
@@ -46,18 +48,34 @@ pub struct ModelInfo {
     pub verified: bool,
 }
 
-const MXW01_CAPS: Caps = Caps { width_px: 384, grayscale_4bpp: true };
-const CLASSIC_CAPS: Caps = Caps { width_px: 384, grayscale_4bpp: false };
+const MXW01_CAPS: Caps = Caps {
+    width_px: 384,
+    grayscale_4bpp: true,
+};
+const CLASSIC_CAPS: Caps = Caps {
+    width_px: 384,
+    grayscale_4bpp: false,
+};
 
 macro_rules! classic {
     ($n:literal) => {
-        ModelInfo { name: $n, family: Family::Classic, caps: CLASSIC_CAPS, verified: false }
+        ModelInfo {
+            name: $n,
+            family: Family::Classic,
+            caps: CLASSIC_CAPS,
+            verified: false,
+        }
     };
 }
 
 /// Known advertised names.
 pub const REGISTRY: &[ModelInfo] = &[
-    ModelInfo { name: "MXW01", family: Family::Mxw01, caps: MXW01_CAPS, verified: true },
+    ModelInfo {
+        name: "MXW01",
+        family: Family::Mxw01,
+        caps: MXW01_CAPS,
+        verified: true,
+    },
     classic!("GB01"),
     classic!("GB02"),
     classic!("GB03"),
@@ -93,7 +111,11 @@ pub struct Detected {
 /// `forced` (from --model) wins over everything.
 pub fn detect(name: Option<&str>, has_ae03: bool, forced: Option<Family>) -> Detected {
     let by_name = name.and_then(lookup);
-    let family = forced.or(by_name.map(|m| m.family)).unwrap_or(if has_ae03 { Family::Mxw01 } else { Family::Classic });
+    let family = forced.or(by_name.map(|m| m.family)).unwrap_or(if has_ae03 {
+        Family::Mxw01
+    } else {
+        Family::Classic
+    });
     let caps = match by_name {
         Some(m) if forced.is_none() || forced == Some(m.family) => m.caps,
         _ => match family {
@@ -103,10 +125,17 @@ pub fn detect(name: Option<&str>, has_ae03: bool, forced: Option<Family>) -> Det
     };
     let label = match (by_name, name) {
         (Some(m), _) => m.name.to_string(),
-        (None, Some(n)) if !n.is_empty() => format!("{n} (unknown model, driving as {})", family.name()),
+        (None, Some(n)) if !n.is_empty() => {
+            format!("{n} (unknown model, driving as {})", family.name())
+        }
         _ => format!("unknown model (driving as {})", family.name()),
     };
-    Detected { family, caps, label, known: by_name.is_some() }
+    Detected {
+        family,
+        caps,
+        label,
+        known: by_name.is_some(),
+    }
 }
 
 #[cfg(test)]

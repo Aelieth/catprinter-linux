@@ -6,12 +6,17 @@ use catprinterd::config::{Cli, Cmd};
 fn main() {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(&cli.log_level).unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_new(&cli.log_level).unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .without_time()
         .init();
 
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
     let code = rt.block_on(async move {
         match cli.cmd.unwrap_or(Cmd::Serve(cli.serve)) {
             Cmd::Serve(a) => catprinterd::commands::serve(a).await,

@@ -6,8 +6,13 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
-#[command(name = "catprinterd", version, about = "IPP Everywhere driver for Bluetooth cat printers",
-          args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+#[command(
+    name = "catprinterd",
+    version,
+    about = "IPP Everywhere driver for Bluetooth cat printers",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -110,7 +115,12 @@ pub struct ServeArgs {
     #[arg(long, env = "CATPRINTER_MAX_COPIES", default_value_t = 10)]
     pub max_copies: u32,
     /// Advertised raster resolutions (dpi). "203" native; "203,406" makes CUPS render Normal/High at 406 dpi.
-    #[arg(long, env = "CATPRINTER_RESOLUTIONS", default_value = "203", value_delimiter = ',')]
+    #[arg(
+        long,
+        env = "CATPRINTER_RESOLUTIONS",
+        default_value = "203",
+        value_delimiter = ','
+    )]
     pub resolutions: Vec<u32>,
     /// Advertise on Avahi (loopback _ipp._tcp).
     #[arg(long, env = "CATPRINTER_DNSSD", value_enum, default_value_t = OnOff::On)]
@@ -128,7 +138,11 @@ pub struct ServeArgs {
     #[arg(long, env = "CATPRINTER_UUID")]
     pub uuid: Option<String>,
     /// printer-location text.
-    #[arg(long, env = "CATPRINTER_LOCATION", default_value = "Bluetooth, wherever the cat printer is")]
+    #[arg(
+        long,
+        env = "CATPRINTER_LOCATION",
+        default_value = "Bluetooth, wherever the cat printer is"
+    )]
     pub location: String,
     #[command(flatten)]
     pub ble: BleArgs,
@@ -199,7 +213,11 @@ pub struct EnsureQueueArgs {
     pub queue: String,
     #[arg(long, env = "CATPRINTER_PORT", default_value_t = 8095)]
     pub port: u16,
-    #[arg(long, env = "CATPRINTER_LOCATION", default_value = "Bluetooth, wherever the cat printer is")]
+    #[arg(
+        long,
+        env = "CATPRINTER_LOCATION",
+        default_value = "Bluetooth, wherever the cat printer is"
+    )]
     pub location: String,
     /// Remove the queue instead of creating it.
     #[arg(long, default_value_t = false)]

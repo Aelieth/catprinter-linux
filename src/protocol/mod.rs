@@ -45,7 +45,8 @@ pub const CRC8_TABLE: [u8; 256] = [
 
 /// CRC-8 over `data` only.
 pub fn crc8(data: &[u8]) -> u8 {
-    data.iter().fold(0u8, |crc, &b| CRC8_TABLE[(crc ^ b) as usize])
+    data.iter()
+        .fold(0u8, |crc, &b| CRC8_TABLE[(crc ^ b) as usize])
 }
 
 /// GATT UUIDs shared by both families (main service AE30, alt AF30 on some stacks).
