@@ -1,173 +1,104 @@
-# catprinter-linux
+# catprinter-linux — `catprinterd`
 
-Linux driver for the **MXW01** Bluetooth cat printer. File → Print is the goal.
+**Bluetooth "cat" thermal printers as regular Linux printers.** `catprinterd` is a small Rust daemon
+that turns an MXW01 (and the GB0x/GT01/MX0x/YT01/X5/X6 family) into a driverless **IPP Everywhere**
+printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer: no PPD to install, no
+per-user setup, works for every account on the machine, survives reboots without anyone logging in.
 
-This is not the GT01/GB01 protocol. Those printers speak `0x51 0x78` on one
-characteristic. The MXW01 speaks `0x22 0x21` and needs **three** BLE
-characteristics (`AE01` control, `AE02` notify, `AE03` image data). See
-[PROTOCOL.md](PROTOCOL.md).
-
-## Kid contract
-
-1. Turn Bluetooth on.
-2. Turn the little printer on (paper loaded).
-3. Print.
-
-No pairing. Do not click Pair in Bluetooth Settings, and do not leave the
-printer Connected there between jobs — that parks its only radio slot.
-Power the printer on when you print. The driver scans (or borrows a
-Settings link if you already clicked Connect), prints, and disconnects.
-Bluetooth is left alone until the next job.
-
-No MAC addresses. Walk the printer to the other computer and do the same
-thing — install the driver once on each machine.
-
-## Install
-
-```bash
-# On the host (Fedora Silverblue / Workstation):
-#   Bluetooth is BlueZ. Turn it on in Settings.
-# Inside a toolbox/distrobox this repo still works — it talks to the host bus.
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+```
+File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──► catprinterd ──► Bluetooth LE ──► 🐈
 ```
 
-Add your user to the `bluetooth` group if scans fail as a normal user (this is a
-home-directory usermod, not an rpm-ostree layer):
+* **Kid contract:** Bluetooth on, printer on, print. No pairing, no MAC addresses, no apps.
+* **Hold-and-wait:** if the printer is off, the job waits (10 min by default) and the queue says
+  *"Cat printer not found — turn it on and keep it near the computer"*. Switch it on → it prints.
+* **Immutable-first:** one static binary, two systemd units, one env file. Nothing layered into
+  rpm-ostree; runtime needs only base-image packages (`cups`, `cups-filters`, `bluez`, `avahi`).
+* **Model autodetect:** MXW01 (16-level grayscale) or the classic family; new printer → it just works.
 
-```bash
-sudo usermod -aG bluetooth "$USER"
-# log out and back in
+## Install (admin, once per machine)
+
+Grab the kit (`make kit` → `dist/catprinter-kit/`, or the release tarball) and run:
+
+```sh
+sudo ./install.sh              # install or upgrade
+sudo ./install.sh status       # units, health, CUPS queue, journal
+sudo ./install.sh update       # swap binary, restart, regenerate the CUPS PPD
+sudo ./install.sh uninstall    # remove queue + units (+ --purge for /etc/catprinter)
 ```
 
-On Immutable Fedora, BlueZ is the **host** daemon. A toolbox/distrobox has no
-system bus; `print.py` will use `/run/host/run/dbus/system_bus_socket` by
-itself. Do not bake a MAC address into your deploy script — the CLI
-auto-discovers `MXW01`.
+What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon,
+`DynamicUser`, hardened) and `catprinter-queue.service` (a root oneshot that runs
+`lpadmin -p CatPrinter -m everywhere …` at every boot, so the queue self-heals), creates
+`/etc/catprinter/env`, and prints a status table. Old per-user `mxw01d` units are removed.
 
-## Usage
+**Image-baked (custom uBlue image):** `make image-files DEST=<rootfs>` drops the same files into
+`/usr/bin`, `/usr/lib/systemd/system` and a `system-preset` — zero per-machine steps.
 
-```bash
-source venv/bin/activate
+Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPRINTER_DEVICE`
+(pin one printer), `CATPRINTER_MODEL` (`auto|mxw01|classic`), `CATPRINTER_PRINTER_WAIT`,
+`CATPRINTER_PORT`, `CATPRINTER_DNSSD`, `CATPRINTERD_ARGS` (e.g. `--fake-printer DIR` for testing).
 
-# Print an image (auto-discovers any MXW01 in range)
-./print.py photo.png
+## In the print dialog
 
-# Darker / lighter (0-255, default 0x5D)
-./print.py -i 0x80 photo.png
+| Setting | Choices | What happens |
+|---|---|---|
+| Media / paper size | **48x297mm** (tape, default), 48x500mm, A4, Letter, Custom 48×(25–5000) mm | Tape sizes: white margins are trimmed and the content fills the 384-dot head. A4/Letter: the whole page is shrunk to the tape width (miniature). |
+| Print quality | **Normal** (drawings), Draft (sharp text), High (photos → 16-level grayscale on the MXW01) | selects dithering / grayscale / burn intensity |
+| Copies, n-up, landscape | as usual | CUPS handles them |
 
-# Preview the tape (PNG + 48 mm PDF) and ask before printing
-./print.py --show-preview photo.png
+Kids never need to touch these; the defaults print drawings and text nicely.
+Never make CatPrinter the *default* printer (homework on 48 mm tape); `install.sh` warns if it is.
 
-# Write the preview and stop (no Bluetooth)
-./print.py --preview-only -q picture --tone grayscale photo.png
+## Troubleshooting (what the queue says → what to do)
 
-# Battery / paper / temperature
-./print.py --status
-
-# Feed or retract paper
-./print.py --eject 40
-./print.py --retract 20
-
-# If a print comes out striped, force one BLE write per row
-./print.py --slow photo.png
-
-# Print style: default, picture, text, document (whole A4/Letter page)
-./print.py -q picture vacation.jpg
-./print.py -q text notes.pdf
-./print.py -q document homework.pdf
-
-# Real 16-level grayscale (best photos). Independent of style.
-./print.py -q picture --tone grayscale vacation.jpg
-```
-
-Two independent controls (same names as the CUPS dropdowns):
-
-**Print style** — what the page is.
-
-| Style | What it does |
+| Queue message (`lpstat -p CatPrinter -l`, GNOME/KDE printer applet) | Do this |
 |---|---|
-| `default` | Mixed drawings. Trim white, then fill the tape. Normal heat (`0x5D`). |
-| `picture` | Photos and crayon. Hotter head (`0x78`), stronger curve. |
-| `text` | Homework doodles and terminal dumps. Sharp, no speckle. |
-| `document` | Whole A4 / Letter page, no trim, shrink to 48 mm. Tell the kids this one. |
+| Cat printer not found — turn it on and keep it near the computer | Power the printer on (and close the phone app; it allows one connection). The job continues by itself. |
+| Bluetooth is turned off on this computer | Turn Bluetooth on (`rfkill unblock bluetooth`). |
+| The cat printer is out of paper. | Load a roll, close the lid. |
+| The cat printer is too hot / battery is low | Wait a minute / charge it. |
+| Cat printer not found for 10 min — job N stopped | The job gave up; turn the printer on and print again. |
+| Print would be … long; limit … | Pick a shorter page size or split the document. |
+| queue missing / daemon down | `sudo ./install.sh status`, `journalctl -u catprinter -u catprinter-queue`, `sudo ./install.sh update` |
+| two "Cat Printer" entries in the dialog | the daemon adopts the CUPS queue's uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
 
-**Tone** — how the head burns it.
+`catprinterd check` (Bluetooth adapter / bluetoothd / port) and `catprinterd status` (connects to the
+printer, reports model, battery, paper) are handy on the console.
 
-| Tone | What it does |
-|---|---|
-| `blackwhite` | 1 bit per dot. Floyd–Steinberg (default/picture) or a hard threshold (text). |
-| `grayscale` | 16 real burn levels (4 bpp). Best photos. Picture + Grayscale is the quality path. |
+## Developing
 
-White margins are cropped, then the result is scaled to 384 px wide (the print head). A doodle on an A4 page becomes a short strip, not a white banner. Color is Rec. 709 luma; transparent pixels become white paper.
-
-By default the image is rotated 180° so text comes out right-side up. Pass
-`--top-first` to skip that.
-
-If nothing is found:
-
-```
-Turn the cat printer on and make sure Bluetooth is on.
-```
-
-## Hardware test
-
-```bash
-bluetoothctl power on
-./print.py --status
-./print.py media/hackoclock.jpg
+```sh
+make check                      # fmt, clippy -D warnings, tests, shell lint
+cargo run -- serve --port 8096 --fake-printer /tmp/fake --dnssd off     # no hardware needed
+ipptool -V 2.0 -tI -f tests/fixtures/text-roll48.pwg -d filetype=image/pwg-raster \
+        ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/ipp-everywhere.test
+driverless ipp://127.0.0.1:8096/ipp/print      # the PPD CUPS would generate
+lpadmin -p CatTest -E -v ipp://127.0.0.1:8096/ipp/print -m everywhere && lp -d CatTest file.pdf
+cargo run -- print media/hackoclock.jpg -q high    # straight to the printer over BLE
+cargo run -- print file.png --preview-only out.png # render only
 ```
 
-## CUPS (File → Print)
+* `--fake-printer DIR` writes `job-N-*.png` (what the head would burn) + `job-N.json` per job and
+  is scripted by `DIR/state` (`ok|off|no-paper|overheated|low-battery|slow|flaky:N`).
+* Raster fixtures come from CUPS itself: `scripts/make-fixtures.sh` (uses `cupsfilter`).
+* Layout: `src/protocol` (wire formats), `src/models` (registry + drivers), `src/ble` (BlueZ over
+  D-Bus), `src/raster` (PWG decode), `src/render` (trim/fit/dither/pack), `src/ipp` + `src/http`
+  (IPP Everywhere), `src/engine` (queue/worker), `src/dnssd` (Avahi), `src/cupsq` (uuid adoption).
+* Protocol notes: [PROTOCOL.md](PROTOCOL.md).
 
-`mxw01d` is a localhost IPP printer. It must run as the logged-in user (Bluetooth).
-CUPS stays the host daemon. Nothing is written into `/usr`.
+### Supported models
 
-Aurora / Bazzite already ship `pdftoppm`, Ghostscript, and CUPS — we use those
-to rasterize PDFs. No extra PDF library.
+| Family | Names | Verified here |
+|---|---|---|
+| MXW01 | `MXW01` — 384 px, 1-bit + 4-bit grayscale | yes (hardware) |
+| classic (upstream rbaron/catprinter set) | GB01 GB02 GB03 GT01 MX05 MX06 MX08 MX09 MX10 MX11 YT01 X5 X6 — 384 px, 1-bit | protocol ported byte-for-byte from the reference implementation; **not hardware-tested by this project** — reports welcome |
 
-```bash
-# In the user session (or via contrib/catprinter-mxw01d.service)
-./venv/bin/python mxw01d
-
-# Once, as a user who can run lpadmin (often needs sudo on Fedora):
-sudo lpadmin -p CatPrinter -E \
-  -v ipp://127.0.0.1:8095/ipp/print \
-  -P "$PWD/data/catprinter.ppd" \
-  -D "Cat Printer"
-```
-
-In the print dialog: printer **Cat Printer**, size **Cat tape 48 mm** for
-drawings, style **Default** / **Picture** / **Text** / **Document**, tone
-**Black and white** / **Grayscale**, type **Paper** / **Sticker** (label only).
-
-Tell the kids: homework from LibreOffice → **Document**. That selects a full
-A4 page and we shrink the whole sheet onto the tape. Drawings stay on Cat
-tape 48 mm (Default / Picture). If a program still previews a sliver, pick
-paper size **Document A4** (or **Document Letter**) once.
-
-The GTK/Qt preview follows the page size. For what the head will actually
-burn, use `./print.py --preview-only` and open `catprinter-preview.pdf`.
-
-After updating the PPD, run `lpadmin` again so CUPS picks up Document.
-
-Do not enable CUPS sharing. Each machine talks BLE itself.
-
-## What works / what's next
-
-- [x] MXW01 BLE protocol (print, status, eject)
-- [x] Auto-discover by name / service, strongest RSSI if two are on
-- [x] Disconnect when the job ends (so the other room can grab it)
-- [x] CUPS / File → Print via localhost IPP (`mxw01d`)
-- [x] Orthogonal Default/Picture/Text × BlackWhite/Grayscale, real 4 bpp grayscale
-- [ ] Your deploy script on the kids' machines
+Unknown names that advertise the AE30 service are driven by GATT shape (AE03 present ⇒ MXW01
+protocol, else classic); force with `CATPRINTER_MODEL=`.
 
 ## Credits
 
-- Protocol: [jeremy46231/MXW01-catprinter](https://github.com/jeremy46231/MXW01-catprinter),
-  [dave9123/MXW01-catprinter](https://github.com/dave9123/MXW01-catprinter),
-  [MaikelChan/CatPrinterBLE](https://github.com/MaikelChan/CatPrinterBLE)
-- Original GT01 Python client + dithering: [rbaron/catprinter](https://github.com/rbaron/catprinter)
-- Linux BlueZ MTU workaround from this fork's upstream
+Built on the reverse engineering of the cat-printer community: [rbaron/catprinter](https://github.com/rbaron/catprinter)
+(classic family), [jeremy46231/MXW01-catprinter](https://github.com/jeremy46231/MXW01-catprinter) and
+[MaikelChan/CatPrinterBLE](https://github.com/MaikelChan/CatPrinterBLE) (MXW01, 4-bit grayscale). MIT licensed.
