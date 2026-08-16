@@ -525,7 +525,7 @@ impl IppService {
             .filter(|j| ids.is_empty() || ids.contains(&j.id))
             .collect();
         if which == "completed" || which == "aborted" || which == "canceled" {
-            jobs.sort_by(|a, b| b.id.cmp(&a.id));
+            jobs.sort_by_key(|j| std::cmp::Reverse(j.id));
         } else {
             jobs.sort_by_key(|j| j.id);
         }

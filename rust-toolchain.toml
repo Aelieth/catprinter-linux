@@ -1,0 +1,4 @@
+# Pin the toolchain so CI and developers lint with the same clippy; bump deliberately.
+[toolchain]
+channel = "1.94"
+components = ["rustfmt", "clippy"]
