@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---- settings from /etc/catprinter/env (KEY=VALUE lines only; no sourcing of arbitrary shell) ------
-envval() { [[ -r $ENV_FILE ]] && sed -n "s/^[[:space:]]*$1=//p" "$ENV_FILE" | tail -1 | tr -d '"' || true; }
+envval() { if [[ -r $ENV_FILE ]]; then sed -n "s/^[[:space:]]*$1=//p" "$ENV_FILE" | tail -1 | tr -d '"'; fi; }
 PORT=$(envval CATPRINTER_PORT); PORT=${PORT:-8095}
 QUEUE=$(envval CATPRINTER_QUEUE); QUEUE=${QUEUE:-CatPrinter}
 URI="ipp://127.0.0.1:$PORT/ipp/print"
@@ -123,7 +123,7 @@ preflight() {
   [[ -x $CUPS_FILTERS/gstoraster || -x $CUPS_FILTERS/pdftoraster ]] || die "cups-filters incomplete: need gstoraster or pdftoraster"
   ok "cups-filters chain present"
   systemctl is-active --quiet cups || { systemctl start cups || die "cannot start cups"; }
-  local i; for i in $(seq 1 15); do lpstat -r 2>/dev/null | grep -q 'is running' && break; sleep 1; done
+  local i; for i in $(seq 1 15); do lpstat -r 2>/dev/null | grep -q 'is running' && break; sleep 1; done; : "$i"
   ok "cupsd running"
   systemctl is-enabled --quiet bluetooth 2>/dev/null || systemctl enable bluetooth >/dev/null 2>&1 || true
   systemctl is-active --quiet bluetooth || systemctl start bluetooth || warn "bluetooth.service failed to start"
@@ -209,7 +209,7 @@ do_install() {
     die "catprinterd did not answer on $HEALTH"
   fi
   ok "daemon answering at $HEALTH"
-  "$(installed_bin)" check --port "$PORT" >/dev/null 2>&1 && ok "Bluetooth ready" || warn "Bluetooth adapter not powered — kids: turn Bluetooth on"
+  if "$(installed_bin)" check --port "$PORT" >/dev/null 2>&1; then ok "Bluetooth ready"; else warn "Bluetooth adapter not powered — kids: turn Bluetooth on"; fi
   systemctl restart catprinter-queue || true
   if ! systemctl is-active --quiet catprinter-queue; then
     journalctl -u catprinter-queue -n 20 --no-pager >&2 || true

@@ -24,9 +24,11 @@ jobs:
         run: |
           set -euo pipefail
           v="v$(make -s version)"
-          if [ "$v" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} != Cargo version $v"; exit 1
-          fi
+          # tag must be vX.Y.Z or a pre-release of it (vX.Y.Z-rc1, vX.Y.Z-beta2 …)
+          case "${GITHUB_REF_NAME}" in
+            "$v"|"$v"-*) ;;
+            *) echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo version $v"; exit 1 ;;
+          esac
 
       - name: Build kit
         run: make kit
