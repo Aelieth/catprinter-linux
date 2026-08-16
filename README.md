@@ -85,7 +85,14 @@ cargo run -- print file.png --preview-only out.png # render only
 * Layout: `src/protocol` (wire formats), `src/models` (registry + drivers), `src/ble` (BlueZ over
   D-Bus), `src/raster` (PWG decode), `src/render` (trim/fit/dither/pack), `src/ipp` + `src/http`
   (IPP Everywhere), `src/engine` (queue/worker), `src/dnssd` (Avahi), `src/cupsq` (uuid adoption).
-* Protocol notes: [PROTOCOL.md](PROTOCOL.md).
+* Protocol notes: [PROTOCOL.md](PROTOCOL.md). The Python driver this was ported from (and its
+  hardware-proven BLE quirks) is preserved at git tag `python-final`; source comments cite it as
+  `catprinter/*.py`.
+* Hardware notes (MXW01, this project): connects reliably at MTU 512; at weak signal (≈ −80 dBm)
+  BlueZ often aborts the first connect (`le-connection-abort-by-local`) — the daemon retries
+  (3 attempts per round, rounds until `CATPRINTER_PRINTER_WAIT`). Strips longer than 4000 lines
+  (multi-request segments) and the "Bluetooth Settings holds the link" path are implemented but
+  were not exercised on hardware.
 
 ### Supported models
 

@@ -1,5 +1,5 @@
 *PPD-Adobe: "4.3"
-*% MXW01 48 mm thermal cat printer — used by cupsd when talking to mxw01d.
+*% MXW01 48 mm thermal cat printer — throw-away PPD used only by scripts/make-fixtures.sh (cupsfilter needs one).
 *% Roll by default. Document A4/Letter exist so LibreOffice can emit a full page.
 *FormatVersion: "4.3"
 *FileVersion: "1.2"

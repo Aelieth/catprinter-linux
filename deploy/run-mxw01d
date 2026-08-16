@@ -1,9 +1,0 @@
-#!/bin/bash
-# Start the IPP daemon from *this* tree, wherever it was copied.
-set -euo pipefail
-ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-PY="${CATPRINTER_PYTHON:-}"
-if [ -z "$PY" ] && [ -x "$ROOT/venv/bin/python" ]; then
-    PY="$ROOT/venv/bin/python"
-fi
-exec "${PY:-python3}" "$ROOT/mxw01d" "$@"

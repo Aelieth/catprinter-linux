@@ -21,7 +21,7 @@ done
 # --- sample inputs -----------------------------------------------------------------------
 # A plain-text file → PDF through texttopdf (needs a PPD for its page size: the roll).
 [[ -f "$SAMPLES/text.pdf" ]] || \
-  cupsfilter -p "$PPD" -m application/pdf "test-print/Text File.txt" > "$SAMPLES/text.pdf" 2>/dev/null
+  cupsfilter -p "$PPD" -m application/pdf "$SAMPLES/text-file.txt" > "$SAMPLES/text.pdf" 2>/dev/null
 # CUPS's own one-page A4 test document.
 [[ -f "$SAMPLES/onepage-a4.pdf" ]] || \
   zcat /usr/share/cups/ipptool/onepage-a4.pdf.gz > "$SAMPLES/onepage-a4.pdf"
