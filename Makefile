@@ -71,7 +71,7 @@ image-files: build
 	install -D -m 0755 target/release/catprinterd $(DEST)/usr/bin/catprinterd
 	mkdir -p $(DEST)/usr/lib/systemd/system
 	for u in catprinter.service catprinter-queue.service; do \
-	  sed 's#/usr/local/bin/catprinterd#/usr/bin/catprinterd#g' packaging/$$u > $(DEST)/usr/lib/systemd/system/$$u; \
+	  sed 's#^ExecStart=/usr/local/bin/catprinterd#ExecStart=/usr/bin/catprinterd#' packaging/$$u > $(DEST)/usr/lib/systemd/system/$$u; \
 	done
 	install -D -m 0644 packaging/80-catprinter.preset $(DEST)/usr/lib/systemd/system-preset/80-catprinter.preset
 	install -D -m 0644 packaging/env.example $(DEST)/usr/lib/catprinter/env.example
