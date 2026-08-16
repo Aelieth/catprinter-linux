@@ -53,12 +53,21 @@ pub struct PrinterConfig {
     pub started: SystemTime,
 }
 
+/// Wrap a bare IPv6 address in brackets for a URI authority.
+fn bracket_host(h: &str) -> String {
+    if h.contains(':') && !h.starts_with('[') {
+        format!("[{h}]")
+    } else {
+        h.to_string()
+    }
+}
+
 impl PrinterConfig {
     pub fn printer_uri(&self) -> String {
-        format!("ipp://{}:{}/ipp/print", self.host, self.port)
+        format!("ipp://{}:{}/ipp/print", bracket_host(&self.host), self.port)
     }
     pub fn http_base(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+        format!("http://{}:{}", bracket_host(&self.host), self.port)
     }
     pub fn uuid(&self) -> String {
         self.uuid.read().map(|u| u.clone()).unwrap_or_default()
@@ -98,20 +107,10 @@ impl IppService {
         } else {
             0x0101
         };
-        let parsed = catch_unwind(AssertUnwindSafe(|| parse(body)));
-        let req = match parsed {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
+        let req = match parse_contained(body) {
+            Ok(r) => r,
+            Err(e) => {
                 tracing::debug!("bad IPP request: {e}");
-                let r = Resp::new(ver, Status::ClientErrorBadRequest, id)
-                    .status_message("malformed IPP request");
-                return IppOutcome {
-                    body: r.into_bytes(),
-                    http_status: if peek.is_some() { 200 } else { 400 },
-                };
-            }
-            Err(_) => {
-                tracing::warn!("IPP parser panicked on a malformed request (contained)");
                 let r = Resp::new(ver, Status::ClientErrorBadRequest, id)
                     .status_message("malformed IPP request");
                 return IppOutcome {

@@ -27,12 +27,16 @@ async fn health_ok(port: u16) -> bool {
     else {
         return false;
     };
-    if s.write_all(
-        format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
-            .as_bytes(),
+    if tokio::time::timeout(
+        Duration::from_secs(2),
+        s.write_all(
+            format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        ),
     )
     .await
-    .is_err()
+    .map(|r| r.is_err())
+    .unwrap_or(true)
     {
         return false;
     }

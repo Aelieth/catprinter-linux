@@ -94,25 +94,25 @@ pub struct ServeArgs {
     #[arg(long, env = "CATPRINTER_PORT", default_value_t = 8095)]
     pub port: u16,
     /// Seconds a job keeps retrying to reach the printer before it is aborted.
-    #[arg(long, env = "CATPRINTER_PRINTER_WAIT", default_value_t = 600)]
+    #[arg(long, env = "CATPRINTER_PRINTER_WAIT", default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
     pub printer_wait: u64,
     /// Print every job to PNG files in DIR instead of Bluetooth (testing).
     #[arg(long, env = "CATPRINTER_FAKE_PRINTER")]
     pub fake_printer: Option<PathBuf>,
     /// Max jobs waiting in the queue before Print-Job answers server-error-busy.
-    #[arg(long, env = "CATPRINTER_QUEUE_MAX", default_value_t = 16)]
-    pub queue_max: usize,
+    #[arg(long, env = "CATPRINTER_QUEUE_MAX", default_value_t = 16, value_parser = clap::value_parser!(u64).range(1..=1000))]
+    pub queue_max: u64,
     /// Max accepted document size in MiB.
-    #[arg(long, env = "CATPRINTER_MAX_DOCUMENT_MB", default_value_t = 64)]
-    pub max_document_mb: usize,
+    #[arg(long, env = "CATPRINTER_MAX_DOCUMENT_MB", default_value_t = 64, value_parser = clap::value_parser!(u64).range(1..=1024))]
+    pub max_document_mb: u64,
     /// Max total strip length in lines (203 lines ≈ 25.4 mm); longer jobs are rejected, never truncated.
-    #[arg(long, env = "CATPRINTER_MAX_LINES", default_value_t = 8000)]
+    #[arg(long, env = "CATPRINTER_MAX_LINES", default_value_t = 8000, value_parser = clap::value_parser!(u32).range(100..=65535))]
     pub max_lines: u32,
     /// Max lines per print request (segment).
-    #[arg(long, env = "CATPRINTER_MAX_LINES_PER_REQUEST", default_value_t = 4000)]
+    #[arg(long, env = "CATPRINTER_MAX_LINES_PER_REQUEST", default_value_t = 4000, value_parser = clap::value_parser!(u32).range(90..=65535))]
     pub max_lines_per_request: u32,
     /// Max copies honoured per job.
-    #[arg(long, env = "CATPRINTER_MAX_COPIES", default_value_t = 10)]
+    #[arg(long, env = "CATPRINTER_MAX_COPIES", default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=99))]
     pub max_copies: u32,
     /// Advertised raster resolutions (dpi). "203" native; "203,406" makes CUPS render Normal/High at 406 dpi.
     #[arg(
@@ -229,4 +229,48 @@ pub struct EnsureQueueArgs {
     /// Seconds to wait for the daemon and cupsd before giving up.
     #[arg(long, default_value_t = 60)]
     pub wait: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["catprinterd"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn defaults_are_sane() {
+        let c = parse(&[]).unwrap();
+        assert_eq!(c.serve.port, 8095);
+        assert_eq!(c.serve.max_copies, 10);
+        assert_eq!(c.serve.max_document_mb, 64);
+        assert_eq!(c.serve.printer_wait, 600);
+    }
+
+    #[test]
+    fn rejects_absurd_values() {
+        assert!(parse(&["--max-copies", "3000000000"]).is_err());
+        assert!(parse(&["--max-copies", "0"]).is_err());
+        assert!(parse(&["--max-document-mb", "999999"]).is_err());
+        assert!(parse(&["--max-document-mb", "0"]).is_err());
+        assert!(parse(&["--max-lines", "0"]).is_err());
+        assert!(parse(&["--max-lines", "70000"]).is_err());
+        assert!(parse(&["--max-lines-per-request", "10"]).is_err());
+        assert!(parse(&["--queue-max", "0"]).is_err());
+        assert!(parse(&["--printer-wait", "0"]).is_err());
+        // sane values still parse
+        assert!(parse(&[
+            "--max-copies",
+            "5",
+            "--max-document-mb",
+            "32",
+            "--max-lines",
+            "4000"
+        ])
+        .is_ok());
+    }
 }

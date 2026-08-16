@@ -79,8 +79,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     };
     let cfg = EngineConfig {
         printer_wait: Duration::from_secs(args.printer_wait),
-        queue_max: args.queue_max.max(1),
-        max_document_bytes: args.max_document_mb.max(1) * 1024 * 1024,
+        queue_max: args.queue_max.max(1) as usize,
+        max_document_bytes: (args.max_document_mb.max(1) * 1024 * 1024) as usize,
         max_copies: args.max_copies.max(1),
         render,
         limits: crate::raster::Limits::default(),
@@ -120,6 +120,12 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     };
     let ipp = Arc::new(IppService::new(engine.clone(), pcfg.clone()));
 
+    if !args.bind.is_loopback() {
+        tracing::warn!(
+            "--bind {} is not loopback; the service unit blocks non-local traffic (IPAddressDeny=any) and the CUPS queue URI is always 127.0.0.1",
+            args.bind
+        );
+    }
     // ---- bind first (fail fast if the port is taken)
     let addr = std::net::SocketAddr::new(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(addr)
@@ -191,7 +197,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         ..AppState::new(
             ipp.clone(),
             engine.clone(),
-            args.max_document_mb.max(1) * 1024 * 1024 + 65536,
+            (args.max_document_mb.max(1) * 1024 * 1024 + 65536) as usize,
         )
     });
 

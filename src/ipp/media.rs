@@ -163,7 +163,7 @@ pub fn parse_media_name(name: &str) -> Option<(i32, i32)> {
 /// Match a requested (x,y) to one of our fixed sizes (tolerance 1 mm), for labels/logging.
 pub fn find_size(x_hmm: i32, y_hmm: i32) -> Option<&'static MediaSize> {
     ALL.iter()
-        .find(|m| (m.x_hmm - x_hmm).abs() <= 100 && (m.y_hmm - y_hmm).abs() <= 100)
+        .find(|m| m.x_hmm.abs_diff(x_hmm) <= 100 && m.y_hmm.abs_diff(y_hmm) <= 100)
 }
 
 /// Contents of /strings/en.strings (Apple .strings format used by printer-strings-uri).

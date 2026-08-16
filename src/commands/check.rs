@@ -25,13 +25,16 @@ pub async fn run(args: CheckArgs) -> i32 {
     };
 
     if let Some(conn) = &conn {
-        let owned = match zbus::fdo::DBusProxy::new(conn).await {
-            Ok(dbus) => dbus
-                .name_has_owner("org.bluez".try_into().unwrap())
-                .await
-                .unwrap_or(false),
-            Err(_) => false,
+        // `catprinterd check` runs inline in install.sh — a wedged dbus-daemon must not hang it.
+        let probe = async {
+            let dbus = zbus::fdo::DBusProxy::new(conn).await.ok()?;
+            dbus.name_has_owner("org.bluez".try_into().ok()?).await.ok()
         };
+        let owned = tokio::time::timeout(std::time::Duration::from_secs(3), probe)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false);
         if owned {
             println!("{:<16} ok", "bluetoothd");
         } else {

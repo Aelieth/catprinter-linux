@@ -108,7 +108,13 @@ pub fn txt_records(cfg: &DnssdConfig, uuid: &str) -> Vec<Vec<u8>> {
         ("priority", "50".to_string()),
     ];
     kv.iter()
-        .map(|(k, v)| format!("{k}={v}").into_bytes())
+        .map(|(k, v)| {
+            // A DNS-SD TXT entry is one length-prefixed string ≤ 255 bytes; an over-long note or
+            // ty would make Avahi reject the whole registration (silently, after one log line).
+            let mut e = format!("{k}={v}").into_bytes();
+            e.truncate(255);
+            e
+        })
         .collect()
 }
 
@@ -239,13 +245,17 @@ async fn register_and_watch(
                     if attempts > 5 {
                         anyhow::bail!("name collision persists");
                     }
-                    let alt = server
-                        .get_alternative_service_name(&name)
-                        .await
-                        .unwrap_or_else(|_| format!("{name} ({attempts})"));
+                    let alt = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        server.get_alternative_service_name(&name),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_else(|| format!("{name} ({attempts})"));
                     tracing::info!("dnssd: name '{name}' in use, trying '{alt}'");
                     name = alt;
-                    let _ = group.reset().await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), group.reset()).await;
                     continue;
                 }
                 return Err(e.into());
@@ -271,18 +281,26 @@ async fn register_and_watch(
         if attempts > 5 {
             anyhow::bail!("name collision persists");
         }
-        let alt = server
-            .get_alternative_service_name(&name)
-            .await
-            .unwrap_or_else(|_| format!("{name} ({attempts})"));
+        let alt = tokio::time::timeout(
+            Duration::from_secs(5),
+            server.get_alternative_service_name(&name),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_else(|| format!("{name} ({attempts})"));
         tracing::info!("dnssd: name '{name}' collided, trying '{alt}'");
         name = alt;
-        let _ = group.reset().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), group.reset()).await;
     }
     tracing::info!(
         "dnssd: advertising '{name}' (_ipp._tcp on lo, port {}) via Avahi {}",
         cfg.port,
-        server.get_version_string().await.unwrap_or_default()
+        tokio::time::timeout(Duration::from_secs(3), server.get_version_string())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
     );
     *logged_absent = false;
     set_status(
@@ -291,6 +309,9 @@ async fn register_and_watch(
     );
 
     // Watch: uuid changes → update TXT; periodic health poll; shutdown → Free.
+    // Once the uuid sender is dropped, `changed()` returns Err forever — disable that select arm
+    // instead of spinning.
+    let mut uuid_open = true;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
     loop {
@@ -300,8 +321,8 @@ async fn register_and_watch(
                 set_status(status, serde_json::json!({"enabled": true, "registered": false, "note": "shutdown"}));
                 return Ok(());
             }
-            changed = cfg.uuid.changed() => {
-                if changed.is_err() { continue; }
+            changed = cfg.uuid.changed(), if uuid_open => {
+                if changed.is_err() { uuid_open = false; continue; }
                 let new = cfg.uuid.borrow().clone();
                 if new != uuid {
                     uuid = new;
@@ -354,5 +375,20 @@ mod tests {
             assert!(txt.iter().any(|t| t == k), "missing {k}");
         }
         assert!(!txt.iter().any(|t| t.starts_with("printer-type")));
+    }
+
+    #[test]
+    fn txt_values_are_capped_at_255() {
+        let (_tx, rx) = tokio::sync::watch::channel(String::new());
+        let cfg = DnssdConfig {
+            name: "Cat Printer".into(),
+            port: 8095,
+            model_label: "MXW01".into(),
+            location: "x".repeat(400),
+            uuid: rx,
+        };
+        for e in txt_records(&cfg, "urn:uuid:abc") {
+            assert!(e.len() <= 255, "TXT entry {} bytes", e.len());
+        }
     }
 }

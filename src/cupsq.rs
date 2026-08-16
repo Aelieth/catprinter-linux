@@ -23,8 +23,12 @@ pub async fn cups_request(path: &str, body: Bytes) -> anyhow::Result<crate::ipp:
         crate::VERSION,
         body.len()
     );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(&body).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(&body).await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("cupsd write timed out"))??;
     let mut raw = Vec::with_capacity(8192);
     tokio::time::timeout(Duration::from_secs(20), stream.read_to_end(&mut raw)).await??;
     let (status, hdrs, body) = split_http(&raw)?;
