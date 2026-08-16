@@ -107,3 +107,37 @@ bytes[(y * 384 + x) >> 1] |= level << (((x & 1) ^ 1) << 2)
 - AE03 writes must be a whole number of 192-byte rows (384 bytes / 2 rows is a good ATT-sized chunk)
 
 4 bpp was reverse-engineered by [MaikelChan/CatPrinterBLE](https://github.com/MaikelChan/CatPrinterBLE).
+
+---
+
+# Classic family (GB01 / GB02 / GB03 / GT01 / MX05 / MX06 / MX08 / MX09 / MX10 / MX11 / YT01 / X5 / X6)
+
+The older cat printers share the same GATT service (`AE30`, sometimes `AF30`) but speak a different
+dialect, reverse engineered by the community and implemented in
+[rbaron/catprinter](https://github.com/rbaron/catprinter) (`cmds.py`), which `catprinterd` ports
+byte-for-byte in `src/protocol/classic.rs`.
+
+* **Characteristics:** `AE01` write (control **and** image rows), `AE02` notify. There is no `AE03`;
+  `catprinterd` uses "AE03 present ⇒ MXW01, else classic" when the advertised name is unknown.
+* **Frame:** `51 78 <cmd> 00 <len lo> <len hi> <payload> <crc8(payload)> FF` — same CRC-8/Dallas table
+  as the MXW01, computed over the payload only.
+
+| Cmd | Name | Payload |
+|-----|------|---------|
+| `A1` | Set paper | `30 00` |
+| `A2` | Draw bitmap row (raw) | 48 bytes, LSB = leftmost pixel, 1 = black |
+| `A3` | Get device state | `00` |
+| `A4` | Set quality (200 dpi) | `32` |
+| `A6` | Control lattice | start `AA 55 17 38 44 5F 5F 5F 44 38 2C`, end `AA 55 17 00 00 00 00 00 00 00 17` |
+| `A8` | Get device info | `00` |
+| `AF` | Set energy | `u16` big-endian (upstream default `FFFF`) |
+| `BD` | Feed paper | `u8` lines |
+| `BE` | Draw mode / apply energy | `00` image, `01` text (also sent as "apply energy") |
+| `BF` | Draw bitmap row (RLE) | 7-bit run lengths, bit 7 = colour; used when ≤ 48 bytes |
+
+* **Print stream** (`cmds_print_img`): get-state · set-quality · set-energy · apply-energy ·
+  lattice-start · one `A2`/`BF` frame per row · feed 25 · set-paper ×3 · lattice-end · get-state.
+  Written to `AE01` in MTU−3-byte chunks with ~20 ms pacing.
+* **Done:** the printer notifies `51 78 AE 01 01 00 00 00 FF` on `AE02` when it is ready again
+  (upstream waited up to 30 s for it).
+* No grayscale mode; `catprinterd` renders 1-bit for this family regardless of the quality setting.
