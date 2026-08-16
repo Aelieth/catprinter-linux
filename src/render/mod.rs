@@ -980,7 +980,9 @@ mod tests {
             started.elapsed()
         );
         match err {
-            RenderError::TooLong { lines, max_lines, .. } => {
+            RenderError::TooLong {
+                lines, max_lines, ..
+            } => {
                 assert!(lines > 100_000, "projected {lines}");
                 assert_eq!(max_lines, 8000);
             }
