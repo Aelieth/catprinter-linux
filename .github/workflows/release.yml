@@ -41,10 +41,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist
+          path: .
 
-      - name: Show what is published
+      - name: Unbundle and verify the tested kit
         run: |
+          tar -xzf dist.tar.gz
           ls -la dist/
           cat dist/SHA256SUMS
           echo "VERSION: $(cat dist/catprinter-kit/VERSION)"

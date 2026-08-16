@@ -119,11 +119,19 @@ jobs:
           test -x dist/image-root/usr/lib/catprinter/install.sh
           ls -la dist/ dist/catprinter-kit/
 
+      # Tar the whole dist tree before uploading: the image-root ships
+      # multi-user.target.wants/*.service symlinks that point at absolute /usr paths, and
+      # actions/upload-artifact follows symlinks (dropping these unresolvable ones). tar keeps
+      # them as symlinks (they resolve inside the fedora image after COPY image-root/ /) and
+      # preserves file modes too.
+      - name: Bundle dist (preserve symlinks + modes)
+        run: tar -czf dist.tar.gz dist
+
       - name: Upload dist
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist/
+          path: dist.tar.gz
           if-no-files-found: error
 
   # Boots the kit and the image files in real systemd containers (see scripts/fleet-test.sh):
@@ -139,11 +147,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist
+          path: .
 
-      # upload-artifact drops file modes.
-      - name: Restore modes
-        run: chmod 0755 dist/catprinter-kit/catprinterd dist/catprinter-kit/install.sh dist/image-root/usr/bin/catprinterd dist/image-root/usr/lib/catprinter/install.sh
+      - name: Unbundle dist (symlinks + modes intact)
+        run: |
+          tar -xzf dist.tar.gz
+          test -L dist/image-root/etc/systemd/system/multi-user.target.wants/catprinter.service \
+            || { echo "::error::wants symlink lost in transit"; exit 1; }
 
       - name: Run the fleet test
         run: |

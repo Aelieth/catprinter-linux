@@ -210,7 +210,17 @@ fn cups_suites_pass() {
         let (ok, text) = run_ipptool(d.port, Some(&fixture("photo-roll48.pwg")), t, &[]);
         assert!(ok && !text.contains("[FAIL]"), "{t} failed:\n{text}");
     }
-    let json = std::fs::read_to_string(d.dir.path().join("job-1.json")).unwrap();
+    // Job ids are monotonic (time-based) so the first job is not id 1 — find the job JSON.
+    let job_json = std::fs::read_dir(d.dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            let n = p.file_name().unwrap().to_string_lossy();
+            n.starts_with("job-") && n.ends_with(".json")
+        })
+        .expect("fake printer wrote no job-*.json");
+    let json = std::fs::read_to_string(&job_json).unwrap();
     assert!(json.contains("\"width\": 384"), "{json}");
     assert!(d.dir.path().join("identify-1.txt").exists());
 }
