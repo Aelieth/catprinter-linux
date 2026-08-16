@@ -14,7 +14,7 @@ DEST ?= dist/image-root
 FIXTURE := tests/fixtures/text-roll48.pwg
 IPPTOOL_TESTS := /usr/share/cups/ipptool
 # `make fleet-test` boots systemd containers; podman must be able to run --privileged --systemd=always.
-# From a distrobox: make fleet-test FLEET_PODMAN="distrobox-host-exec podman" (rootless works too).
+# From a distrobox: make fleet-test PODMAN="distrobox-host-exec podman" (rootless works too).
 FLEET_PODMAN ?= $(shell if [ "$$(id -u)" = 0 ]; then echo podman; else echo "sudo podman"; fi)
 
 .PHONY: help version build check test lint kit image-files fleet-test fixtures install ipptool musl clean
@@ -26,7 +26,7 @@ help:
 	  'test         cargo test --locked' \
 	  'kit          dist/catprinter-kit/ + $(TARBALL) + dist/SHA256SUMS' \
 	  'image-files  DEST=dir  files for an image build: /usr/bin, /usr/lib/systemd/system (+wants symlinks), preset, /usr/lib/catprinter' \
-	  'fleet-test   boot the kit and the image files in systemd containers (FLEET_PODMAN="$(FLEET_PODMAN)"; KEEP=1, FLEET_FIRST_BOOT=1)' \
+	  'fleet-test   boot the kit and the image files in systemd containers (PODMAN="$(FLEET_PODMAN)"; KEEP=1, FLEET_FIRST_BOOT=1)' \
 	  'ipptool      run the IPP Everywhere suite against a fake-printer daemon (needs ipptool)' \
 	  'fixtures     regenerate tests/fixtures/*.pwg with the host CUPS filters' \
 	  'install      sudo dist/catprinter-kit/install.sh install' \
@@ -100,7 +100,7 @@ image-files: build
 
 # Real systemd-in-podman boot of both install paths (image-baked rebase case, kit + kit->image migration).
 fleet-test: kit image-files
-	PODMAN="$(FLEET_PODMAN)" scripts/fleet-test.sh
+	PODMAN="$(if $(PODMAN),$(PODMAN),$(FLEET_PODMAN))" scripts/fleet-test.sh
 
 fixtures:
 	scripts/make-fixtures.sh
