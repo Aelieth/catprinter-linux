@@ -4,7 +4,10 @@ use std::path::Path;
 
 use crate::config::{BleArgs, CheckArgs, EnsureQueueArgs, PrintArgs, ServeArgs};
 
+pub mod check;
+pub mod print;
 pub mod serve;
+pub mod status;
 
 pub async fn serve(args: ServeArgs) -> i32 {
     match serve::run(args).await {
@@ -16,19 +19,16 @@ pub async fn serve(args: ServeArgs) -> i32 {
     }
 }
 
-pub async fn check(_args: CheckArgs) -> i32 {
-    eprintln!("check: not implemented yet");
-    2
+pub async fn check(args: CheckArgs) -> i32 {
+    check::run(args).await
 }
 
-pub async fn status(_args: BleArgs) -> i32 {
-    eprintln!("status: not implemented yet");
-    2
+pub async fn status(args: BleArgs) -> i32 {
+    status::run(args).await
 }
 
-pub async fn print(_args: PrintArgs) -> i32 {
-    eprintln!("print: not implemented yet");
-    2
+pub async fn print(args: PrintArgs) -> i32 {
+    print::run(args).await
 }
 
 pub async fn inspect(file: &Path) -> i32 {
