@@ -77,7 +77,7 @@ pub enum PrintError {
         last: String,
         hint: String,
     },
-    #[error("Bluetooth link too small for image data (MTU {mtu}); move the printer closer and try again")]
+    #[error("Bluetooth link too small for image data (MTU {mtu}) — the Bluetooth stack negotiated a tiny packet size; turn the printer off and on so it reconnects")]
     MtuTooSmall { mtu: u16 },
     #[error("Connected, but this is not a cat printer we know: {0}")]
     NotCatPrinter(String),
@@ -89,6 +89,10 @@ pub enum PrintError {
     NoAnswer(&'static str),
     #[error("Bluetooth link to the printer was lost")]
     LinkLost,
+    /// The link dropped (or the printer went silent) after image data had already been written.
+    /// NOT retryable: a blind retry reprints the part that already came out of the head.
+    #[error("The print stopped partway (Bluetooth dropped). Move the printer next to the computer and print again.")]
+    Interrupted { lines_sent: u32 },
     #[error("Timed out while {0}")]
     Timeout(&'static str),
     #[error("cancelled")]
@@ -113,10 +117,16 @@ impl PrintError {
             | PrintError::NoAnswer(_)
             | PrintError::LinkLost
             | PrintError::Timeout(_)
-            | PrintError::Bus(_) => true,
-            PrintError::Condition(c) => c.error.as_deref() != Some("other"),
-            PrintError::NotCatPrinter(_)
+            // A reject is almost always "busy" (head still running, phone app poking it);
+            // that is transient, and the printer-wait deadline bounds how long we keep trying.
             | PrintError::Rejected(_)
+            | PrintError::Bus(_) => true,
+            // Every reported condition (no paper, overheating, even "other") can clear on its
+            // own — someone feeds paper, the head cools down — so keep retrying until the
+            // printer-wait deadline.
+            PrintError::Condition(_) => true,
+            PrintError::NotCatPrinter(_)
+            | PrintError::Interrupted { .. }
             | PrintError::Cancelled
             | PrintError::Render(_)
             | PrintError::Io(_) => false,
@@ -125,7 +135,13 @@ impl PrintError {
 
     /// Kid-facing one-liner for the queue.
     pub fn kid_message(&self) -> String {
-        self.to_string()
+        match self {
+            // The raw reject code means nothing to a kid; busy is the overwhelmingly common cause.
+            PrintError::Rejected(_) => {
+                "The printer is busy — if it stays stuck, turn it off and on.".into()
+            }
+            _ => self.to_string(),
+        }
     }
 
     /// IPP printer-state-reasons keywords while this error is being retried / after giving up.
@@ -143,6 +159,7 @@ impl PrintError {
             },
             PrintError::Render(_) => &[],
             PrintError::Cancelled => &[],
+            // Interrupted and the rest surface as a generic error.
             _ => &["other-error"],
         }
     }
@@ -184,5 +201,80 @@ impl Printer {
 
     pub fn is_fake(&self) -> bool {
         matches!(self, Printer::Fake(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cond(error: Option<&str>) -> Condition {
+        Condition {
+            ok: false,
+            state: "error".into(),
+            battery: None,
+            temperature: None,
+            error: error.map(String::from),
+            message: "test".into(),
+        }
+    }
+
+    #[test]
+    fn retryable_matrix() {
+        // Transient — keep trying inside the printer-wait window.
+        assert!(PrintError::NoBluetoothd.retryable());
+        assert!(PrintError::AdapterOff.retryable());
+        assert!(PrintError::NotFound.retryable());
+        assert!(PrintError::ConnectFailed {
+            attempts: 3,
+            last: "x".into(),
+            hint: String::new()
+        }
+        .retryable());
+        assert!(PrintError::MtuTooSmall { mtu: 23 }.retryable());
+        assert!(PrintError::NoAnswer("status").retryable());
+        assert!(PrintError::LinkLost.retryable());
+        assert!(PrintError::Timeout("connecting").retryable());
+        assert!(PrintError::Bus("boom".into()).retryable());
+        // Busy/reject is transient (D4).
+        assert!(PrintError::Rejected("01".into()).retryable());
+        // Every condition retries, including "other" (D4).
+        assert!(PrintError::Condition(cond(Some("no-paper"))).retryable());
+        assert!(PrintError::Condition(cond(Some("overheated"))).retryable());
+        assert!(PrintError::Condition(cond(Some("other"))).retryable());
+        assert!(PrintError::Condition(cond(None)).retryable());
+        // Terminal — retrying would reprint or can never work.
+        assert!(!PrintError::Interrupted { lines_sent: 42 }.retryable());
+        assert!(!PrintError::NotCatPrinter("phone".into()).retryable());
+        assert!(!PrintError::Cancelled.retryable());
+        assert!(!PrintError::Io(std::io::Error::other("x")).retryable());
+    }
+
+    #[test]
+    fn interrupted_kid_message_and_reasons() {
+        let e = PrintError::Interrupted { lines_sent: 7 };
+        assert_eq!(
+            e.kid_message(),
+            "The print stopped partway (Bluetooth dropped). Move the printer next to the computer and print again."
+        );
+        assert_eq!(e.printer_reasons(), &["other-error"]);
+    }
+
+    #[test]
+    fn rejected_kid_message_is_busy() {
+        let e = PrintError::Rejected("0102".into());
+        assert_eq!(
+            e.kid_message(),
+            "The printer is busy — if it stays stuck, turn it off and on."
+        );
+        // The technical display keeps the reject code for logs.
+        assert!(e.to_string().contains("0102"));
+    }
+
+    #[test]
+    fn mtu_message_does_not_blame_distance() {
+        let m = PrintError::MtuTooSmall { mtu: 23 }.to_string();
+        assert!(!m.to_lowercase().contains("closer"), "{m}");
+        assert!(m.contains("23"), "{m}");
     }
 }

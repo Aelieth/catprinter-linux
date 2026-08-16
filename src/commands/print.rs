@@ -116,15 +116,20 @@ pub async fn run(args: PrintArgs) -> i32 {
         forced_family: args.ble.model.family(),
         slow: args.ble.slow,
         pacing_ms: args.ble.pacing_ms,
+        notify_mode: args.ble.notify_mode,
     });
     let cancel = CancellationToken::new();
-    // Cancel on Ctrl-C so the Drop guard disconnects.
+    // First Ctrl-C cancels cooperatively (print() observes it during scan/connect too and the
+    // session is closed on the way out); a second Ctrl-C force-quits the process.
     {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\ncancelling…");
+            eprintln!("\ncancelling… (Ctrl-C again to force quit)");
             cancel.cancel();
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("force quit");
+            std::process::exit(130);
         });
     }
     let mut last = 255u8;

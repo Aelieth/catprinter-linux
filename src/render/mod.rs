@@ -357,6 +357,34 @@ pub fn prepare(pages: Vec<GrayPage>, opts: &RenderOptions) -> Result<GrayStrip, 
         }
     }
 
+    // Reject an over-long strip BEFORE resampling: a thin tape stroke (crop width ~18 px) scales
+    // to ~20x its height, so fitting every page first could allocate gigabytes only to error out.
+    // Project each page's post-fit height (same rule as fit_width) and sum with the page gaps.
+    let gap_lines = if inked.len() > 1 {
+        opts.page_gap_lines
+    } else {
+        0
+    };
+    let projected: u64 = inked
+        .iter()
+        .zip(&crops)
+        .map(|(_p, (rows, cols))| {
+            let cw = (cols.end - cols.start).max(1);
+            let ch = rows.end - rows.start;
+            projected_fit_height(cw, ch, opts.width_px) as u64
+        })
+        .sum::<u64>()
+        + gap_lines as u64 * (inked.len() as u64 - 1);
+    if projected > opts.max_lines_total as u64 {
+        let lines = projected.min(u32::MAX as u64) as u32;
+        return Err(RenderError::TooLong {
+            lines,
+            mm: lines_to_mm(lines),
+            max_lines: opts.max_lines_total,
+            max_mm: lines_to_mm(opts.max_lines_total),
+        });
+    }
+
     // Per page: crop → fit width → unsharp.
     let mut fitted: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(inked.len());
     for (p, (rows, cols)) in inked.iter().zip(crops) {
@@ -406,11 +434,26 @@ pub fn prepare(pages: Vec<GrayPage>, opts: &RenderOptions) -> Result<GrayStrip, 
 
 /// Stage 2: tone/dither/quantize for `mode`, rotate, segment, pack for a head `width_px` wide
 /// (resample if the strip width differs). `Gray4` is only valid on models with 4bpp support.
+/// Pads every short segment up to the MXW01 protocol minimum (`MIN_LINES`); classic-family
+/// callers use [`pack_padded`] with `pad_to_min = false` instead.
 pub fn pack(
     strip: &GrayStrip,
     opts: &RenderOptions,
     mode: PrintMode,
     width_px: u32,
+) -> Result<Packed, RenderError> {
+    pack_padded(strip, opts, mode, width_px, true)
+}
+
+/// [`pack`] with explicit control over the family-minimum padding. `pad_to_min = false` skips the
+/// ≥`MIN_LINES` zero-padding: the classic family has no 90-row protocol minimum, and padding there
+/// would print up to 89 blank rows before the trailing feed.
+pub fn pack_padded(
+    strip: &GrayStrip,
+    opts: &RenderOptions,
+    mode: PrintMode,
+    width_px: u32,
+    pad_to_min: bool,
 ) -> Result<Packed, RenderError> {
     if strip.width == 0 || strip.height == 0 || width_px == 0 {
         return Err(RenderError::Empty);
@@ -475,7 +518,7 @@ pub fn pack(
             pack_row(mode, row_levels, &mut data);
         }
         let mut lines = take;
-        if lines < MIN_LINES {
+        if pad_to_min && lines < MIN_LINES {
             data.extend(std::iter::repeat_n(
                 0u8,
                 ((MIN_LINES - lines) as usize) * row_bytes,
@@ -608,6 +651,17 @@ fn crop(p: &GrayPage, rows: Range<u32>, cols: Range<u32>) -> (u32, u32, Vec<u8>)
 /// render.py `fit_width`: make the width exactly `width` (Lanczos3 both directions), except that
 /// widths within ±8 px are centre-padded / cropped instead of resampled (blur-free for 383/384-px
 /// tape rasters). Height keeps the aspect ratio (min 1).
+/// The height `fit_width` will produce, without doing the work — for the pre-resize length check.
+/// Mirrors `fit_width`: widths within ±8 px keep their height (pad/crop), otherwise the aspect
+/// ratio is preserved (min 1).
+pub fn projected_fit_height(w: u32, h: u32, width: u32) -> u32 {
+    if (w as i64 - width as i64).abs() <= 8 {
+        h
+    } else {
+        ((h as f64 * width as f64 / w as f64).round() as u32).max(1)
+    }
+}
+
 pub fn fit_width(w: u32, h: u32, data: &[u8], width: u32) -> (u32, u32, Vec<u8>) {
     if w == width {
         return (w, h, data.to_vec());
@@ -909,6 +963,32 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn thin_tall_stroke_is_rejected_before_resampling() {
+        // A 20-px-wide, 12000-tall inked column on a 384-wide tape scales to ~20x its height
+        // (~228000 lines). The pre-resize projection must reject it (fast, no giant alloc) — and
+        // the projected length, not the pre-scale height, is what the error reports.
+        let mut page = white(20, 12000, 203);
+        fill(&mut page, 0, 0, 20, 12000, 0);
+        let started = std::time::Instant::now();
+        let err = prepare(vec![page], &opts(Preset::Default, Tone::BlackWhite)).unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?} — did it resample before rejecting?",
+            started.elapsed()
+        );
+        match err {
+            RenderError::TooLong { lines, max_lines, .. } => {
+                assert!(lines > 100_000, "projected {lines}");
+                assert_eq!(max_lines, 8000);
+            }
+            other => panic!("{other:?}"),
+        }
+        // projected_fit_height matches fit_width's rule: within ±8 px keeps height, else scales.
+        assert_eq!(projected_fit_height(380, 100, 384), 100);
+        assert_eq!(projected_fit_height(192, 100, 384), 200);
     }
 
     #[test]

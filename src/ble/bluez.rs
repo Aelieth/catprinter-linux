@@ -194,6 +194,9 @@ pub fn map_err(e: zbus::Error, what: &'static str) -> PrintError {
                 hint: String::new(),
             }
         }
+        // bluez answers writes on a dropped link with Failed("Not connected") — that is a lost
+        // link (retryable), not a generic bus error.
+        _ if is_gone(&e) => PrintError::LinkLost,
         _ => match e {
             zbus::Error::InputOutput(_)
             | zbus::Error::Connection(_, _)

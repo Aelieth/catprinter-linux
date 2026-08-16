@@ -76,7 +76,7 @@ Matches MaikelChan (who indexes the full GATT notification; payload starts at by
 2. `A2` set intensity
 3. `A1` get status; abort if not ready
 4. `A9` print request with line count; wait for ACK `00`
-5. Stream packed 384-wide rows to **AE03** (~15 ms between 48-byte chunks)
+5. Stream packed 384-wide rows to **AE03** (pacing `--pacing-ms`, default 8 ms per bulk write)
 6. `AD` flush
 7. Wait for `AA`
 8. Disconnect (single BLE connection — do not hold the link idle)
@@ -137,7 +137,7 @@ byte-for-byte in `src/protocol/classic.rs`.
 
 * **Print stream** (`cmds_print_img`): get-state · set-quality · set-energy · apply-energy ·
   lattice-start · one `A2`/`BF` frame per row · feed 25 · set-paper ×3 · lattice-end · get-state.
-  Written to `AE01` in MTU−3-byte chunks with ~20 ms pacing.
+  Written to `AE01` in MTU−3-byte chunks (≥ 20 bytes) with `max(--pacing-ms, 20 ms)` pacing.
 * **Done:** the printer notifies `51 78 AE 01 01 00 00 00 FF` on `AE02` when it is ready again
   (upstream waited up to 30 s for it).
 * No grayscale mode; `catprinterd` renders 1-bit for this family regardless of the quality setting.

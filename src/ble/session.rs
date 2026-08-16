@@ -54,6 +54,10 @@ pub struct Session {
     control: GattCharacteristic1Proxy<'static>,
     notify_chr: GattCharacteristic1Proxy<'static>,
     data: DataPath,
+    /// WriteValue `type` option for control frames and the WriteValue data fallback:
+    /// `"command"` (write-without-response, MXW01) or `"request"` (classic AE01 that only
+    /// advertises `write`).
+    write_type: &'static str,
     tx: broadcast::Sender<Vec<u8>>,
     /// Kept alive so the forwarding task keeps running.
     _notify_task: NotifyTask,
@@ -100,7 +104,7 @@ impl Session {
             armed: true,
         };
         connect_with_retries(&dev, was_connected, attempts.max(1), weak).await?;
-        wait_services_resolved(conn, &dev).await?;
+        wait_services_resolved(&dev).await?;
 
         // Resolve characteristics from the object tree under this device.
         let objs = bluez::managed_objects(conn).await?;
@@ -127,18 +131,48 @@ impl Session {
         let (tx, notify_task) =
             start_notifications(conn, &notify_chr, &notify_path, notify_mode).await?;
 
-        // Bulk data channel: MXW01 → AE03, classic → AE01 (it streams everything to control).
-        let data_char_path = if detected.family == Family::Mxw01 && has_ae03 {
-            data_path.clone().unwrap_or(control_path.clone())
+        // Bulk data channel: MXW01 → AE03 via AcquireWrite, classic → AE01 via WriteValue only
+        // (AcquireWrite on AE01 makes BlueZ refuse the WriteValue control frames that
+        // identify/status need with NotPermitted).
+        let mut write_type: &'static str = "command";
+        let data = if detected.family == Family::Classic {
+            // Upstream ble.py writes plain GATT chunks of `mtu - 3` to AE01 (ble.py:100,110-112).
+            let mtu = tokio::time::timeout(bluez::CALL_TIMEOUT, control.mtu())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(23)
+                .max(23);
+            let flags = tokio::time::timeout(bluez::CALL_TIMEOUT, control.flags())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            if flags.iter().any(|f| f == "write") {
+                write_type = "request";
+            }
+            DataPath::WriteValue {
+                chr: control.clone(),
+                mtu,
+            }
         } else {
-            control_path.clone()
+            let data_char_path = if has_ae03 {
+                data_path.clone().unwrap_or(control_path.clone())
+            } else {
+                control_path.clone()
+            };
+            // 48 (one 1bpp row) is the floor for every model; 4bpp is downgraded below when the
+            // negotiated MTU cannot carry a 192-byte row.
+            acquire_data_path(conn, &data_char_path, 48).await?
         };
-        let row_bytes = if detected.family == Family::Mxw01 && detected.caps.grayscale_4bpp {
-            192
-        } else {
-            48
-        };
-        let data = acquire_data_path(conn, &data_char_path, row_bytes).await?;
+        let mut caps = detected.caps;
+        if caps.grayscale_4bpp && data.max_payload() < 192 {
+            tracing::info!(
+                "MTU {} cannot carry 192-byte 4bpp rows; falling back to 1-bit",
+                data.mtu()
+            );
+            caps.grayscale_4bpp = false;
+        }
         tracing::info!("MTU {} ({} bytes/write)", data.mtu(), data.max_payload());
 
         guard.armed = false; // the Session owns the link from here on
@@ -149,10 +183,11 @@ impl Session {
             control,
             notify_chr,
             data,
+            write_type,
             tx,
             _notify_task: NotifyTask(notify_task),
             family: detected.family,
-            caps: detected.caps,
+            caps,
             model_label: detected.label,
             pacing_ms,
             slow,
@@ -164,10 +199,10 @@ impl Session {
         self.tx.subscribe()
     }
 
-    /// Write a control frame (small) to the control characteristic, write-without-response.
+    /// Write a control frame (small) to the control characteristic.
     pub async fn write_ctrl(&self, packet: &[u8]) -> Result<(), PrintError> {
         let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-        opts.insert("type", Value::from("command"));
+        opts.insert("type", Value::from(self.write_type));
         bluez::call(
             "writing to the printer",
             bluez::CALL_TIMEOUT,
@@ -176,11 +211,43 @@ impl Session {
         .await
     }
 
-    /// Stream bulk data in whole-row chunks, honouring pacing / slow.
+    /// Write one already-chunked piece of bulk data (no pacing, no re-chunking).
+    pub async fn write_data(&self, piece: &[u8]) -> Result<(), PrintError> {
+        match &self.data {
+            DataPath::Acquired(sock) => loop {
+                match sock.send(piece).await {
+                    Ok(()) => return Ok(()),
+                    // EINTR/EAGAIN: transient, write the same packet again.
+                    Err(e) if classify_io(&e) == IoAction::Retry => continue,
+                    // Anything else on the acquired socket means the LE link is gone —
+                    // retryable, unlike a generic (non-retryable) I/O error.
+                    Err(e) => {
+                        tracing::debug!("acquired-socket write failed: {e}");
+                        return Err(PrintError::LinkLost);
+                    }
+                }
+            },
+            DataPath::WriteValue { chr, .. } => {
+                let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
+                opts.insert("type", Value::from(self.write_type));
+                bluez::call(
+                    "sending image data",
+                    bluez::CALL_TIMEOUT,
+                    chr.write_value(piece, opts),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Stream bulk data in whole-row chunks, honouring pacing / slow. Bytes that reached the
+    /// printer are added to `sent` as they go, so on error the caller knows whether the head
+    /// already has data (and must not blindly retry the whole job).
     pub async fn write_bulk(
         &self,
         data: &[u8],
         row_bytes: usize,
+        sent: &mut usize,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), PrintError> {
         let chunk =
@@ -189,19 +256,8 @@ impl Session {
             if cancel.is_cancelled() {
                 return Err(PrintError::Cancelled);
             }
-            match &self.data {
-                DataPath::Acquired(sock) => sock.send(piece).await.map_err(classify_io)?,
-                DataPath::WriteValue { chr, .. } => {
-                    let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-                    opts.insert("type", Value::from("command"));
-                    bluez::call(
-                        "sending image data",
-                        bluez::CALL_TIMEOUT,
-                        chr.write_value(piece, opts),
-                    )
-                    .await?;
-                }
-            }
+            self.write_data(piece).await?;
+            *sent += piece.len();
             if self.pacing_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(self.pacing_ms)).await;
             }
@@ -245,13 +301,14 @@ impl Session {
         }
     }
 
-    /// Wait for a raw notification matching `pred` (classic ready notification).
-    pub async fn wait_raw(
-        &self,
+    /// Wait on an already-armed receiver for a raw notification matching `pred` (classic ready
+    /// notification). The receiver must be subscribed BEFORE the write it answers, so a ping
+    /// that arrives while the tail of the stream is still going out is not missed.
+    pub async fn wait_raw_on(
+        rx: &mut broadcast::Receiver<Vec<u8>>,
         timeout: Duration,
         mut pred: impl FnMut(&[u8]) -> bool,
     ) -> Result<Vec<u8>, PrintError> {
-        let mut rx = self.subscribe();
         let wait = async {
             loop {
                 match rx.recv().await {
@@ -278,9 +335,9 @@ impl Session {
         }
     }
 
-    /// Disconnect and release the device. Idempotent; always attempted.
+    /// Disconnect and release the device. Idempotent; always attempted. Bounded: two
+    /// CALL_TIMEOUTs plus POST_DISCONNECT_SLEEP (≈ 5 + 5 + 0.8 s worst case).
     pub async fn close(mut self) {
-        self.closed = true;
         let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, self.notify_chr.stop_notify()).await;
         // Drop the acquired fd before disconnecting so BlueZ releases the channel.
         self.data = DataPath::WriteValue {
@@ -288,6 +345,9 @@ impl Session {
             mtu: 23,
         };
         let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, self.dev.disconnect()).await;
+        // Only mark closed once the Disconnect call has actually returned: if this future is
+        // dropped mid-close, the Drop fallback below still releases the link.
+        self.closed = true;
         tracing::info!("disconnected");
         // Cheap LE toys keep advertising off until the link is fully gone.
         tokio::time::sleep(POST_DISCONNECT_SLEEP).await;
@@ -299,16 +359,15 @@ impl Drop for Session {
         if self.closed {
             return;
         }
-        // Best-effort disconnect on cancellation / panic (ble.py:433-451).
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let conn = self.conn.clone();
-            let path = self.device_path.clone();
-            handle.spawn(async move {
-                if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
-                    let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
-                }
-            });
-        }
+        // Best-effort disconnect on cancellation / panic (ble.py:433-451), routed through the
+        // cleanup tracker so main's drain() waits for it before the process exits.
+        let conn = self.conn.clone();
+        let path = self.device_path.clone();
+        crate::ble::cleanup::spawn(async move {
+            if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
+                let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
+            }
+        });
     }
 }
 
@@ -325,15 +384,14 @@ impl Drop for ConnectGuard {
         if !self.armed {
             return;
         }
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let conn = self.conn.clone();
-            let path = self.path.clone();
-            handle.spawn(async move {
-                if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
-                    let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
-                }
-            });
-        }
+        // Routed through the cleanup tracker so main's drain() waits for it (D1).
+        let conn = self.conn.clone();
+        let path = self.path.clone();
+        crate::ble::cleanup::spawn(async move {
+            if let Ok(dev) = bluez::device_proxy(&conn, &path).await {
+                let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
+            }
+        });
     }
 }
 
@@ -352,14 +410,24 @@ async fn connect_with_retries(
             }
             Ok(Err(e)) => {
                 last = bluez::err_message(&e);
-                tracing::warn!("connect attempt {attempt}/{attempts} failed: {last}");
+                // A single-attempt probe of a merely-cached device is routine (printer off);
+                // don't page anyone about it.
+                if attempts == 1 {
+                    tracing::info!("connect attempt {attempt}/{attempts} failed: {last}");
+                } else {
+                    tracing::warn!("connect attempt {attempt}/{attempts} failed: {last}");
+                }
                 if bluez::is_error_named(&e, "org.bluez.Error.NotReady") {
                     return Err(PrintError::AdapterOff);
                 }
             }
             Err(_) => {
                 last = "timed out".into();
-                tracing::warn!("connect attempt {attempt}/{attempts} timed out");
+                if attempts == 1 {
+                    tracing::info!("connect attempt {attempt}/{attempts} timed out");
+                } else {
+                    tracing::warn!("connect attempt {attempt}/{attempts} timed out");
+                }
                 // Cancel a hung in-flight connect.
                 let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
             }
@@ -388,10 +456,7 @@ async fn connect_with_retries(
     })
 }
 
-async fn wait_services_resolved(
-    conn: &Connection,
-    dev: &Device1Proxy<'static>,
-) -> Result<(), PrintError> {
+async fn wait_services_resolved(dev: &Device1Proxy<'static>) -> Result<(), PrintError> {
     let deadline = tokio::time::Instant::now() + SERVICES_RESOLVED_TIMEOUT;
     loop {
         if let Ok(Ok(true)) =
@@ -400,9 +465,10 @@ async fn wait_services_resolved(
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            // Some stacks never flip the property but still expose the chars; let the caller try.
-            let _ = conn;
-            return Ok(());
+            // Timing out here used to fall through to resolve_chars, which then reported the
+            // (non-retryable) NotCatPrinter on an empty tree. Discovery not finishing is a
+            // link/timing problem — report it as such so the engine retries.
+            return Err(PrintError::Timeout("resolving printer services"));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -471,7 +537,9 @@ async fn start_notifications(
                 .map_err(|e| PrintError::Bus(format!("notify fd: {e}")))?;
             let tx2 = tx.clone();
             tokio::spawn(async move {
-                let mut buf = [0u8; 512];
+                // Max ATT notification at MTU 517 is 514 bytes; a 512-byte buffer would
+                // truncate the top of a full-size notification.
+                let mut buf = [0u8; 517];
                 loop {
                     match sock.recv(&mut buf).await {
                         Ok(0) | Err(_) => break,
@@ -493,9 +561,15 @@ async fn start_notifications(
                 .path(notify_path.to_string())
                 .map_err(|e| PrintError::Bus(e.to_string()))?
                 .build();
-            let stream = zbus::MessageStream::for_match_rule(rule, conn, Some(NOTIFY_CHANNEL))
-                .await
-                .map_err(|e| PrintError::Bus(e.to_string()))?;
+            // AddMatch is a bus round-trip like any other — time-bound it (the one call that
+            // previously had no timeout).
+            let stream = tokio::time::timeout(
+                bluez::CALL_TIMEOUT,
+                zbus::MessageStream::for_match_rule(rule, conn, Some(NOTIFY_CHANNEL)),
+            )
+            .await
+            .map_err(|_| PrintError::Timeout("subscribing to notifications"))?
+            .map_err(|e| PrintError::Bus(e.to_string()))?;
             let tx2 = tx.clone();
             tokio::spawn(async move {
                 use futures_util::StreamExt;
@@ -582,9 +656,40 @@ async fn acquire_data_path(
     Ok(DataPath::WriteValue { chr, mtu })
 }
 
-fn classify_io(e: std::io::Error) -> PrintError {
+/// What to do with an I/O error from the acquired SOCK_SEQPACKET channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoAction {
+    /// Transient (EINTR/EAGAIN): write the same packet again.
+    Retry,
+    /// Everything else on this socket means the LE link is gone (ENOTCONN, EPIPE, EIO, …) —
+    /// surface the retryable LinkLost, never the non-retryable generic Io error.
+    LinkLost,
+}
+
+fn classify_io(e: &std::io::Error) -> IoAction {
     match e.raw_os_error() {
-        Some(libc::ENOTCONN) | Some(libc::EPIPE) | Some(libc::ECONNRESET) => PrintError::LinkLost,
-        _ => PrintError::Io(e),
+        Some(libc::EINTR) | Some(libc::EAGAIN) => IoAction::Retry,
+        _ => IoAction::LinkLost,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_io_maps_errnos() {
+        let e = |n: i32| std::io::Error::from_raw_os_error(n);
+        assert_eq!(classify_io(&e(libc::EINTR)), IoAction::Retry);
+        assert_eq!(classify_io(&e(libc::EAGAIN)), IoAction::Retry);
+        assert_eq!(classify_io(&e(libc::ENOTCONN)), IoAction::LinkLost);
+        assert_eq!(classify_io(&e(libc::EPIPE)), IoAction::LinkLost);
+        assert_eq!(classify_io(&e(libc::ECONNRESET)), IoAction::LinkLost);
+        assert_eq!(classify_io(&e(libc::EIO)), IoAction::LinkLost);
+        // No errno at all (e.g. our own WriteZero) still counts as a lost link.
+        assert_eq!(
+            classify_io(&std::io::Error::new(std::io::ErrorKind::WriteZero, "x")),
+            IoAction::LinkLost
+        );
     }
 }

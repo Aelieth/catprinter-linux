@@ -67,6 +67,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             forced_family: args.ble.model.family(),
             slow: args.ble.slow,
             pacing_ms: args.ble.pacing_ms,
+            notify_mode: args.ble.notify_mode,
         }),
     };
     let is_fake = printer.is_fake();

@@ -61,24 +61,29 @@ impl Candidate {
 
 /// Does this look like a cat printer? Hint wins (address or exact name); else a registry name;
 /// else the AE30/AF30 service in the advertised UUIDs.
+///
+/// Registry names shorter than 4 characters (X5, X6) are too generic to trust on their own —
+/// plenty of random gadgets advertise two-letter names — so those must ALSO advertise the
+/// AE30/AF30 service (every real cat printer does). Longer names match by name alone.
 pub fn looks_like_cat_printer(
     name: Option<&str>,
     address: &str,
     uuids: &[String],
     hint: Option<&DeviceHint>,
 ) -> bool {
+    let has_service = uuids
+        .iter()
+        .any(|u| SERVICE_UUIDS.iter().any(|s| s.eq_ignore_ascii_case(u)));
     match hint {
         Some(DeviceHint::Address(a)) => address.eq_ignore_ascii_case(a),
         Some(DeviceHint::Name(n)) => name.is_some_and(|x| x.eq_ignore_ascii_case(n.trim())),
         None => {
             if let Some(n) = name {
-                if crate::models::lookup(n).is_some() {
+                if crate::models::lookup(n).is_some() && (n.trim().len() >= 4 || has_service) {
                     return true;
                 }
             }
-            uuids
-                .iter()
-                .any(|u| SERVICE_UUIDS.iter().any(|s| s.eq_ignore_ascii_case(u)))
+            has_service
         }
     }
 }
@@ -91,13 +96,35 @@ pub fn pick(cands: &[Candidate]) -> Option<&Candidate> {
         .max_by_key(|c| (c.connected, c.rssi.unwrap_or(-999)))
 }
 
+/// Fold one scan poll into the best candidate seen so far during the settle window. A newer
+/// observation of an equal-or-stronger candidate wins (RSSI refreshes between polls).
+pub fn pick_after_settle(best: Option<Candidate>, live: &[Candidate]) -> Option<Candidate> {
+    let cur = pick(live).cloned();
+    match (best, cur) {
+        (None, c) => c,
+        (b, None) => b,
+        (Some(b), Some(c)) => {
+            let key = |x: &Candidate| (x.connected, x.rssi.unwrap_or(-999));
+            Some(if key(&c) >= key(&b) { c } else { b })
+        }
+    }
+}
+
+/// BlueZ sets `Alias` to the dashed MAC when a device never advertised a name; treating that as
+/// a name makes labels like "48-0F-57-17-06-9D (48:0F:57:17:06:9D)" and defeats name detection.
+fn name_is_dashed_mac(name: &str, address: &str) -> bool {
+    !address.is_empty() && name.eq_ignore_ascii_case(&address.replace(':', "-"))
+}
+
 fn candidate_from_props(path: &str, p: &Props) -> Candidate {
+    let address = bluez::prop_str(p, "Address").unwrap_or_default();
     let name = bluez::prop_str(p, "Name")
         .or_else(|| bluez::prop_str(p, "Alias"))
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .filter(|s| !name_is_dashed_mac(s, &address));
     Candidate {
         path: path.to_string(),
-        address: bluez::prop_str(p, "Address").unwrap_or_default(),
+        address,
         name,
         rssi: bluez::prop_i16(p, "RSSI"),
         connected: bluez::prop_bool(p, "Connected").unwrap_or(false),
@@ -105,11 +132,13 @@ fn candidate_from_props(path: &str, p: &Props) -> Candidate {
     }
 }
 
-/// Matching Device1 objects under `adapter_path`.
+/// Matching Device1 objects under `adapter_path`, minus the addresses in `avoid` (devices that
+/// connected fine but turned out not to be cat printers).
 pub fn candidates_from(
     objs: &Objects,
     adapter_path: &str,
     hint: Option<&DeviceHint>,
+    avoid: &[String],
 ) -> Vec<Candidate> {
     let prefix = format!("{adapter_path}/");
     bluez::objects_with(objs, bluez::IFACE_DEVICE)
@@ -117,6 +146,7 @@ pub fn candidates_from(
         .filter(|(path, _)| path.starts_with(&prefix))
         .map(|(path, p)| candidate_from_props(&path, p))
         .filter(|c| looks_like_cat_printer(c.name.as_deref(), &c.address, &c.uuids, hint))
+        .filter(|c| !avoid.iter().any(|a| a.eq_ignore_ascii_case(&c.address)))
         .collect()
 }
 
@@ -176,15 +206,20 @@ pub async fn scan(
     conn: &Connection,
     adapter: &AdapterInfo,
     hint: Option<&DeviceHint>,
+    avoid: &[String],
     timeout: Duration,
 ) -> Result<Candidate, PrintError> {
     let ad = bluez::adapter_proxy(conn, &adapter.path).await?;
     let mut filter: HashMap<&str, Value<'_>> = HashMap::new();
     filter.insert("Transport", Value::from("le"));
     filter.insert("DuplicateData", Value::from(true));
-    if let Err(e) = tokio::time::timeout(bluez::CALL_TIMEOUT, ad.set_discovery_filter(filter)).await
-    {
-        tracing::debug!("set_discovery_filter timed out: {e}");
+    match tokio::time::timeout(bluez::CALL_TIMEOUT, ad.set_discovery_filter(filter)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!(
+            "set_discovery_filter failed (scanning unfiltered): {}",
+            bluez::err_message(&e)
+        ),
+        Err(_) => tracing::debug!("set_discovery_filter timed out (scanning unfiltered)"),
     }
     match tokio::time::timeout(bluez::CALL_TIMEOUT, ad.start_discovery()).await {
         Ok(Ok(())) => {}
@@ -194,19 +229,29 @@ pub async fn scan(
     }
     let deadline = Instant::now() + timeout;
     let mut best: Option<Candidate> = None;
+    let mut settle_until: Option<Instant> = None;
     // Poll the object tree; RSSI/name arrive within a few hundred ms of the first advertisement.
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let objs = bluez::managed_objects(conn).await?;
-        let cands = candidates_from(&objs, &adapter.path, hint);
+        let cands = candidates_from(&objs, &adapter.path, hint, avoid);
         // During a scan only trust devices that are actually advertising now (have RSSI) or connected.
         let live: Vec<Candidate> = cands
             .into_iter()
             .filter(|c| c.rssi.is_some() || c.connected)
             .collect();
-        if let Some(c) = pick(&live) {
-            best = Some(c.clone());
-            break;
+        best = pick_after_settle(best, &live);
+        if best.is_some() {
+            // An explicit --device target is unambiguous: take it right away. Autodetection
+            // keeps polling ~1 s more so a stronger (closer) printer seen a beat later wins.
+            if hint.is_some() {
+                break;
+            }
+            match settle_until {
+                None => settle_until = Some(Instant::now() + Duration::from_millis(1000)),
+                Some(t) if Instant::now() >= t => break,
+                Some(_) => {}
+            }
         }
     }
     best.ok_or(PrintError::NotFound)
@@ -401,7 +446,7 @@ mod tests {
             Err(PrintError::AdapterOff)
         ));
         assert!(choose_adapter(&objs, Some("hci9")).is_err());
-        let cands = candidates_from(&objs, "/org/bluez/hci0", None);
+        let cands = candidates_from(&objs, "/org/bluez/hci0", None, &[]);
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].name.as_deref(), Some("MXW01"));
         assert_eq!(cands[0].rssi, Some(-60));
@@ -409,9 +454,92 @@ mod tests {
             &objs,
             "/org/bluez/hci0",
             Some(&DeviceHint::Address("48:0f:57:17:06:9d".into())),
+            &[],
         );
         assert_eq!(hinted.len(), 1);
-        let none = candidates_from(&objs, "/org/bluez/hci1", None);
+        let none = candidates_from(&objs, "/org/bluez/hci1", None, &[]);
         assert!(none.is_empty());
+        // An avoided address (connected fine but not a cat printer) is excluded, case-insensitively.
+        let avoided = candidates_from(
+            &objs,
+            "/org/bluez/hci0",
+            None,
+            &["48:0f:57:17:06:9d".to_string()],
+        );
+        assert!(avoided.is_empty());
+    }
+
+    #[test]
+    fn short_registry_names_need_the_service_uuid() {
+        let ae30 = ["0000ae30-0000-1000-8000-00805f9b34fb".to_string()];
+        // X5/X6 are two characters — any gadget could advertise that; require AE30/AF30 too.
+        assert!(!looks_like_cat_printer(
+            Some("X6"),
+            "AA:BB:CC:DD:EE:FF",
+            &[],
+            None
+        ));
+        assert!(!looks_like_cat_printer(
+            Some("X5"),
+            "AA:BB:CC:DD:EE:FF",
+            &["0000180f-0000-1000-8000-00805f9b34fb".into()],
+            None
+        ));
+        assert!(looks_like_cat_printer(
+            Some("X6"),
+            "AA:BB:CC:DD:EE:FF",
+            &ae30,
+            None
+        ));
+        // Names of 4+ characters keep matching by name alone.
+        assert!(looks_like_cat_printer(
+            Some("MX05"),
+            "AA:BB:CC:DD:EE:FF",
+            &[],
+            None
+        ));
+        assert!(looks_like_cat_printer(
+            Some("GB01"),
+            "AA:BB:CC:DD:EE:FF",
+            &[],
+            None
+        ));
+        // An explicit hint still matches unconditionally.
+        assert!(looks_like_cat_printer(
+            Some("X6"),
+            "AA:BB:CC:DD:EE:FF",
+            &[],
+            Some(&DeviceHint::Name("X6".into()))
+        ));
+    }
+
+    #[test]
+    fn pick_after_settle_picks_the_stronger_rssi() {
+        let weak = c(Some("MXW01"), "AA:00:00:00:00:01", Some(-82), false, &[]);
+        let strong = c(Some("MXW01"), "AA:00:00:00:00:02", Some(-48), false, &[]);
+        // First poll sees only the weak one; the strong one shows up a beat later and wins.
+        let best = pick_after_settle(None, std::slice::from_ref(&weak));
+        assert_eq!(best.as_ref().unwrap().address, weak.address);
+        let best = pick_after_settle(best, &[weak.clone(), strong.clone()]);
+        assert_eq!(best.as_ref().unwrap().address, strong.address);
+        // A later, emptier poll does not lose the best seen so far.
+        let best = pick_after_settle(best, &[]);
+        assert_eq!(best.as_ref().unwrap().address, strong.address);
+        // A refreshed observation of the same device replaces the stale one.
+        let refreshed = c(Some("MXW01"), "AA:00:00:00:00:02", Some(-40), false, &[]);
+        let best = pick_after_settle(best, std::slice::from_ref(&refreshed));
+        assert_eq!(best.as_ref().unwrap().rssi, Some(-40));
+        // A connected device beats any RSSI.
+        let held = c(Some("MXW01"), "AA:00:00:00:00:03", None, true, &[]);
+        let best = pick_after_settle(best, std::slice::from_ref(&held));
+        assert_eq!(best.unwrap().address, held.address);
+    }
+
+    #[test]
+    fn dashed_mac_alias_is_not_a_name() {
+        assert!(name_is_dashed_mac("48-0F-57-17-06-9D", "48:0F:57:17:06:9D"));
+        assert!(name_is_dashed_mac("48-0f-57-17-06-9d", "48:0F:57:17:06:9D"));
+        assert!(!name_is_dashed_mac("MXW01", "48:0F:57:17:06:9D"));
+        assert!(!name_is_dashed_mac("", ""));
     }
 }

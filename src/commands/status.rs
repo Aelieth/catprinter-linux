@@ -13,6 +13,7 @@ pub async fn run(args: BleArgs) -> i32 {
         forced_family: args.model.family(),
         slow: args.slow,
         pacing_ms: args.pacing_ms,
+        notify_mode: args.notify_mode,
     };
     let cancel = CancellationToken::new();
     match printer.status(&cancel).await {
