@@ -23,6 +23,25 @@ pub struct JobOptions {
     pub ignored: Vec<String>,
 }
 
+impl Default for JobOptions {
+    fn default() -> Self {
+        JobOptions {
+            print_quality: 4,
+            color_mode: "monochrome".into(),
+            content_optimize: "auto".into(),
+            copies: 1,
+            media: None,
+            job_name: "Untitled".into(),
+            user: "anonymous".into(),
+            host: None,
+            document_name: None,
+            document_format: None,
+            compression: "none".into(),
+            ignored: vec![],
+        }
+    }
+}
+
 impl JobOptions {
     /// Extract from a Print-Job / Create-Job / Send-Document / Validate-Job request.
     pub fn from_request(req: &Request, max_copies: u32) -> JobOptions {

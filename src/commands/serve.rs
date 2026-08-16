@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::config::{OnOff, ServeArgs};
 use crate::engine::{Engine, EngineConfig};
@@ -83,7 +84,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         max_copies: args.max_copies.max(1),
         render,
         limits: crate::raster::Limits::default(),
-        shutdown_grace: Duration::from_secs(15),
+        state_dir: args
+            .state_dir
+            .clone()
+            .or_else(|| std::env::var_os("STATE_DIRECTORY").map(std::path::PathBuf::from)),
+        ..EngineConfig::default()
     };
     let (engine, worker) = Engine::start(cfg, printer, shutdown.clone());
 
@@ -131,7 +136,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     ));
     let extra_health = Arc::new(RwLock::new(serde_json::json!({})));
 
-    // ---- side tasks
+    // ---- side tasks (tracked so shutdown can wait for them to wind down)
+    let tracker = TaskTracker::new();
     let (uuid_tx, uuid_rx) = tokio::sync::watch::channel(uuid.read().unwrap().clone());
     crate::cupsq::OUR_PORT.store(args.port, std::sync::atomic::Ordering::Relaxed);
     if args.uuid.is_none() {
@@ -141,7 +147,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             uuid_tx,
             shutdown.clone(),
         );
-        tokio::spawn(adopt);
+        tracker.spawn(adopt);
     }
     if args.dnssd == OnOff::On {
         let cfg = crate::dnssd::DnssdConfig {
@@ -151,14 +157,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             location: args.location.clone(),
             uuid: uuid_rx,
         };
-        tokio::spawn(crate::dnssd::run(
+        tracker.spawn(crate::dnssd::run(
             cfg,
             dnssd_status.clone(),
             shutdown.clone(),
         ));
     }
     if !is_fake {
-        tokio::spawn(crate::ble::adapter_probe_task(
+        tracker.spawn(crate::ble::adapter_probe_task(
             args.ble.adapter.clone(),
             extra_health.clone(),
             shutdown.clone(),
@@ -168,7 +174,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     {
         let engine = engine.clone();
         let sd = shutdown.clone();
-        tokio::spawn(async move {
+        tracker.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tokio::select! {
@@ -180,11 +186,13 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     }
 
     let state = Arc::new(AppState {
-        ipp: ipp.clone(),
-        engine: engine.clone(),
-        max_body: args.max_document_mb.max(1) * 1024 * 1024 + 65536,
         dnssd: dnssd_status,
         extra_health,
+        ..AppState::new(
+            ipp.clone(),
+            engine.clone(),
+            args.max_document_mb.max(1) * 1024 * 1024 + 65536,
+        )
     });
 
     // ---- signals
@@ -206,11 +214,44 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         });
     }
 
-    crate::http::run(listener, state, shutdown.clone()).await?;
-    // Give the worker time to finish/cancel the current job cleanly.
-    match tokio::time::timeout(Duration::from_secs(30), worker).await {
-        Ok(_) => tracing::info!("worker stopped"),
-        Err(_) => tracing::warn!("worker did not stop in time"),
+    // ---- run. The print worker is supervised: if it ever exits while we are not shutting
+    // down, exit non-zero so systemd restarts us — a dead worker would leave HTTP answering
+    // and every job pending forever with /health looking fine.
+    let http = crate::http::run(listener, state, shutdown.clone());
+    tokio::pin!(http);
+    let mut worker = worker;
+    let mut worker_done = false;
+    tokio::select! {
+        r = &mut http => { r?; }
+        w = &mut worker => {
+            worker_done = true;
+            if !shutdown.is_cancelled() {
+                tracing::error!("print worker exited unexpectedly ({w:?}) — restarting the service");
+                engine.begin_shutdown();
+                shutdown.cancel();
+                let _ = tokio::time::timeout(Duration::from_secs(5), &mut http).await;
+                tracker.close();
+                let _ = tokio::time::timeout(Duration::from_secs(5), tracker.wait()).await;
+                anyhow::bail!("print worker died");
+            }
+            // shutdown in progress: let HTTP finish draining
+            let _ = tokio::time::timeout(Duration::from_secs(10), &mut http).await;
+        }
+    }
+    // Give the worker time to finish/cancel the current job cleanly (15 s grace once printing
+    // + 5 s cooperative stop + margin), then the side tasks. TimeoutStopSec in the unit is 45 s.
+    if !worker_done {
+        match tokio::time::timeout(Duration::from_secs(25), &mut worker).await {
+            Ok(_) => tracing::info!("worker stopped"),
+            Err(_) => tracing::warn!("worker did not stop in time"),
+        }
+    }
+    tracker.close();
+    if tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::debug!("side tasks did not stop in time");
     }
     Ok(())
 }

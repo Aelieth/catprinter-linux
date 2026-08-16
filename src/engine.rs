@@ -5,15 +5,17 @@
 //! reasons (the backend would report the job as completed); printer-state is never `stopped`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ipp::options::JobOptions;
-use crate::printer::{PreparedJob, PrintError, Printer, Progress};
+use crate::printer::{Phase, PreparedJob, PrintError, Printer, Progress};
 use crate::raster::{GrayPage, Limits};
 use crate::render::{self, RenderOptions};
 
@@ -85,6 +87,10 @@ pub struct Job {
     /// Create-Job without a document yet.
     pub awaiting_document: bool,
     pub created_at: Instant,
+    /// Last time a client did something for this job (Send-Document/Close-Job started or kept
+    /// streaming). The stale-Create-Job timer counts from here, not from creation, because the
+    /// CUPS backend streams the raster while the filters render it (minutes for a photo PDF).
+    pub last_activity: Instant,
     pub model: Option<String>,
 }
 
@@ -106,7 +112,12 @@ pub struct PrinterView {
     pub current: Option<u32>,
     pub battery: Option<u8>,
     pub last_model: Option<String>,
-    /// When the sticky "gave up" reasons were set (cleared after ERROR_TTL or the next success).
+    /// Why the last job gave up (`offline-report`, `media-empty-error`…). Shown in /health and
+    /// on the status page only — NOT as IPP printer-state-reasons: the CUPS backend copies those
+    /// onto the queue where they would linger until the next job (nothing polls an idle
+    /// printer), so a queue would look "offline" for days after the printer came back.
+    pub sticky_reasons: Vec<&'static str>,
+    /// When the sticky reasons/message were set (cleared after `error_ttl` or the next success).
     pub sticky_since: Option<Instant>,
 }
 
@@ -129,9 +140,12 @@ impl PrinterView {
     }
 }
 
-const ERROR_TTL: Duration = Duration::from_secs(600);
 const KEEP_TERMINAL: usize = 100;
 const KEEP_PREVIEWS: usize = 5;
+/// Job ids count from here (2025-01-01T00:00:00Z) when no persisted counter exists, so ids stay
+/// monotonic across restarts: a CUPS backend still polling an old job must never see a *new*
+/// job's state under the same id.
+const JOB_ID_EPOCH: u64 = 1_735_689_600;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -141,8 +155,19 @@ pub struct EngineConfig {
     pub max_copies: u32,
     pub render: RenderOptions,
     pub limits: Limits,
-    /// Grace given to the current job on shutdown before it is cancelled.
+    /// Grace given to the current job on shutdown (once it is printing) before it is cancelled.
     pub shutdown_grace: Duration,
+    /// Create-Job with no document activity for this long is aborted (multiple-operation-time-out).
+    pub stale_document: Duration,
+    /// How long the sticky "gave up" reasons/message stay in /health after a failed job.
+    pub error_ttl: Duration,
+    /// After cancelling an attempt, how long the driver gets to stop by itself (and release the
+    /// Bluetooth link) before its future is dropped.
+    pub coop_grace: Duration,
+    /// Hard cap on one print attempt (a hung link must not block the queue forever).
+    pub attempt_cap: Duration,
+    /// Where `next-id` is persisted (systemd `$STATE_DIRECTORY`); None = time-based ids only.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -155,6 +180,33 @@ impl Default for EngineConfig {
             render: RenderOptions::default(),
             limits: Limits::default(),
             shutdown_grace: Duration::from_secs(15),
+            stale_document: Duration::from_secs(120),
+            error_ttl: Duration::from_secs(600),
+            coop_grace: Duration::from_secs(5),
+            attempt_cap: Duration::from_secs(15 * 60),
+            state_dir: None,
+        }
+    }
+}
+
+/// First job id for this run: max(time-based, persisted counter).
+fn initial_job_id(state_dir: Option<&Path>) -> u32 {
+    let time_based = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(JOB_ID_EPOCH))
+        .unwrap_or(0)
+        .clamp(1, i32::MAX as u64 / 2) as u32;
+    let persisted = state_dir
+        .and_then(|d| std::fs::read_to_string(d.join("next-id")).ok())
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .unwrap_or(1);
+    time_based.max(persisted).max(1)
+}
+
+fn persist_next_id(state_dir: Option<&Path>, next: u32) {
+    if let Some(d) = state_dir {
+        if let Err(e) = std::fs::write(d.join("next-id"), format!("{next}\n")) {
+            tracing::debug!("could not persist next job id: {e}");
         }
     }
 }
@@ -168,8 +220,10 @@ pub struct Store {
     pub cfg: EngineConfig,
     pub jobs_total: u64,
     pub config_changed_uptime: u32,
-    /// Live queue depth (pending + processing).
     pub identify_requests: u32,
+    /// An Identify is already queued for the worker (requests are coalesced so a burst cannot
+    /// fill the work channel and starve print jobs).
+    pub identify_pending: bool,
 }
 
 impl Store {
@@ -224,23 +278,25 @@ impl Store {
         }
         self.prune();
     }
-    /// Expire the sticky failure state after ERROR_TTL.
+    /// Expire the sticky failure state after `error_ttl`; abort Create-Jobs that went quiet.
     pub fn tick(&mut self) {
         if let Some(t) = self.view.sticky_since {
-            if t.elapsed() > ERROR_TTL && self.view.current.is_none() {
+            if t.elapsed() > self.cfg.error_ttl && self.view.current.is_none() {
                 let up = self.uptime();
                 self.view.set(up, PrinterState::Idle, &[], "");
+                self.view.sticky_reasons.clear();
                 self.view.sticky_since = None;
             }
         }
-        // Create-Job that never got a document
+        // Create-Job whose client went silent (no Send-Document activity for stale_document)
+        let stale_after = self.cfg.stale_document;
         let stale: Vec<u32> = self
             .jobs
             .values()
             .filter(|j| {
                 j.awaiting_document
                     && !j.state.is_terminal()
-                    && j.created_at.elapsed() > Duration::from_secs(120)
+                    && j.last_activity.elapsed() > stale_after
             })
             .map(|j| j.id)
             .collect();
@@ -301,9 +357,10 @@ impl Engine {
         shutdown: CancellationToken,
     ) -> (Engine, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(cfg.queue_max.max(1) + 4);
+        let next_id = initial_job_id(cfg.state_dir.as_deref());
         let store = Arc::new(Mutex::new(Store {
             jobs: BTreeMap::new(),
-            next_id: 1,
+            next_id,
             terminal_order: VecDeque::new(),
             view: PrinterView {
                 state: PrinterState::Idle,
@@ -315,6 +372,7 @@ impl Engine {
                 current: None,
                 battery: None,
                 last_model: None,
+                sticky_reasons: vec![],
                 sticky_since: None,
             },
             started: Instant::now(),
@@ -322,6 +380,7 @@ impl Engine {
             jobs_total: 0,
             config_changed_uptime: 1,
             identify_requests: 0,
+            identify_pending: false,
         }));
         let engine = Engine {
             store: store.clone(),
@@ -356,6 +415,7 @@ impl Engine {
             Some(d) => self.validate_doc(d)?,
             None => DocFormat::Unknown,
         };
+        let awaiting = doc.is_none();
         let id = {
             let mut s = self.store();
             if !s.view.accepting {
@@ -367,13 +427,13 @@ impl Engine {
             }
             let id = s.next_id;
             s.next_id += 1;
+            persist_next_id(s.cfg.state_dir.as_deref(), s.next_id);
             s.jobs_total += 1;
             let up = s.uptime();
             let k_octets = doc
                 .as_ref()
                 .map(|d| d.len().div_ceil(1024) as u32)
                 .unwrap_or(0);
-            let awaiting = doc.is_none();
             s.jobs.insert(
                 id,
                 Job {
@@ -395,15 +455,27 @@ impl Engine {
                     preview: None,
                     awaiting_document: awaiting,
                     created_at: Instant::now(),
+                    last_activity: Instant::now(),
                     model: None,
                 },
             );
             id
         };
-        if !self.store().jobs[&id].awaiting_document {
+        if !awaiting {
             self.enqueue(id);
         }
         Ok(id)
+    }
+
+    /// A client is doing something for this job (Send-Document/Close-Job started or is still
+    /// streaming its body): keeps the stale-Create-Job timer from firing.
+    pub fn touch(&self, id: u32) {
+        let mut s = self.store();
+        if let Some(j) = s.jobs.get_mut(&id) {
+            if !j.state.is_terminal() {
+                j.last_activity = Instant::now();
+            }
+        }
     }
 
     /// Send-Document for a Create-Job job.
@@ -431,6 +503,9 @@ impl Engine {
         {
             let mut s = self.store();
             if let Some(j) = s.jobs.get_mut(&id) {
+                if j.state.is_terminal() || j.cancel.is_cancelled() {
+                    return;
+                }
                 j.reasons = vec!["job-queued"];
             }
         }
@@ -494,21 +569,24 @@ impl Engine {
     }
 
     pub fn identify(&self) {
-        self.store().identify_requests += 1;
-        let _ = self.tx.try_send(Work::Identify);
+        let mut s = self.store();
+        s.identify_requests += 1;
+        if s.identify_pending {
+            return;
+        }
+        s.identify_pending = self.tx.try_send(Work::Identify).is_ok();
     }
 
     /// Ask for a graceful stop: no new jobs, current job gets a grace period, pending jobs aborted.
+    /// No `shutdown` printer-state-reason: the CUPS backend would copy it onto the queue where it
+    /// lingers as an alert after the restart; `printer-is-accepting-jobs=false` + the message is
+    /// what the backend acts on (it waits).
     pub fn begin_shutdown(&self) {
         let mut s = self.store();
         s.view.accepting = false;
         let up = s.uptime();
-        s.view.set(
-            up,
-            PrinterState::Idle,
-            &["shutdown"],
-            "printer service is stopping",
-        );
+        let state = s.view.state;
+        s.view.set(up, state, &[], "printer service is stopping");
     }
 }
 
@@ -524,12 +602,16 @@ async fn worker(
     shutdown: CancellationToken,
 ) {
     loop {
+        // biased: once shutdown is requested, never start another job (an unbiased select would
+        // pick up queued work half the time and start printing it just to abort it 15 s later).
         let work = tokio::select! {
-            w = rx.recv() => match w { Some(w) => w, None => break },
+            biased;
             _ = shutdown.cancelled() => break,
+            w = rx.recv() => match w { Some(w) => w, None => break },
         };
         match work {
             Work::Identify => {
+                lock_store(&store).identify_pending = false;
                 let cancel = CancellationToken::new();
                 let deadline = tokio::time::sleep(Duration::from_secs(20));
                 tokio::pin!(deadline);
@@ -544,7 +626,26 @@ async fn worker(
                 }
             }
             Work::Print(id) => {
-                run_job(&store, &mut printer, id, &shutdown).await;
+                // A panic anywhere in the print path (render::pack, BLE) must not kill the single
+                // worker: HTTP would keep answering while every job stays pending forever.
+                let fut =
+                    std::panic::AssertUnwindSafe(run_job(&store, &mut printer, id, &shutdown));
+                if futures_util::FutureExt::catch_unwind(fut).await.is_err() {
+                    tracing::error!(
+                        job = id,
+                        "print worker panicked (contained) — job aborted; please report"
+                    );
+                    let mut s = lock_store(&store);
+                    let up = s.uptime();
+                    s.finish(
+                        id,
+                        JobState::Aborted,
+                        &["job-completed-with-errors"],
+                        "printer service hiccup — print again",
+                    );
+                    s.view.current = None;
+                    s.view.set(up, PrinterState::Idle, &[], "");
+                }
             }
         }
     }
@@ -588,6 +689,15 @@ async fn run_job(
                 JobState::Canceled,
                 &["job-canceled-by-user"],
                 "Canceled",
+            );
+            return;
+        }
+        if shutdown.is_cancelled() {
+            s.finish(
+                id,
+                JobState::Aborted,
+                &["job-completed-with-errors"],
+                "printer service restarted — print again",
             );
             return;
         }
@@ -680,17 +790,22 @@ async fn run_job(
     // ---- stage 2: print with retries until printer_wait elapses
     let started = Instant::now();
     let deadline = started + cfg.printer_wait;
-    let hard_deadline = deadline + Duration::from_secs(900);
     let mut attempt: u32 = 0;
-    let mut last_err: Option<PrintError> = None;
+    let mut by_shutdown = false;
+    let mut last_log: Option<Instant> = None;
+    // Phase reported by the driver (Searching … Printing), so shutdown can cancel immediately
+    // while nothing has reached the paper yet and only wait `shutdown_grace` once it prints.
+    let phase = Arc::new(AtomicU8::new(Phase::Searching as u8));
     let outcome: Result<crate::printer::PrintReport, PrintError> = loop {
         attempt += 1;
         let store2 = store.clone();
+        let phase2 = phase.clone();
         let mut on_progress = move |p: Progress| {
+            phase2.store(p.phase as u8, Ordering::Relaxed);
             let mut s = store2.lock().unwrap_or_else(|e| e.into_inner());
             let up = s.uptime();
             let msg = match p.phase {
-                crate::printer::Phase::Printing => format!("Printing job {id} — {}%", p.percent),
+                Phase::Printing => format!("Printing job {id} — {}%", p.percent),
                 _ => p.message.clone(),
             };
             s.view.set(up, PrinterState::Processing, &[], msg);
@@ -699,17 +814,44 @@ async fn run_job(
                 j.message = p.message;
             }
         };
-        let res = tokio::select! {
-            r = printer.print(&job, &cancel, &mut on_progress) => r,
-            _ = cancel.cancelled() => Err(PrintError::Cancelled),
-            _ = shutdown_grace(shutdown, cfg.shutdown_grace) => Err(PrintError::Cancelled),
+        // The driver gets a child token: cancelling the job cancels it, and shutdown or the
+        // per-attempt cap cancel it explicitly. In every case the driver is given `coop_grace`
+        // to stop by itself — and release the Bluetooth link cleanly — before its future is
+        // dropped (dropping mid-connect leaves cleanup to best-effort Drop impls).
+        let attempt_token = cancel.child_token();
+        phase.store(Phase::Searching as u8, Ordering::Relaxed);
+        let print_fut = printer.print(&job, &attempt_token, &mut on_progress);
+        tokio::pin!(print_fut);
+        let mut capped = false;
+        let first = tokio::select! {
+            r = &mut print_fut => Some(r),
+            _ = cancel.cancelled() => None,
+            _ = shutdown_wait(shutdown, &phase, cfg.shutdown_grace) => { by_shutdown = true; None }
+            _ = tokio::time::sleep(cfg.attempt_cap) => { capped = true; None }
+        };
+        let res = match first {
+            Some(r) => r,
+            None => {
+                attempt_token.cancel();
+                match tokio::time::timeout(cfg.coop_grace, &mut print_fut).await {
+                    Ok(Ok(rep)) => Ok(rep),
+                    Ok(Err(e)) if capped && matches!(e, PrintError::Cancelled) => {
+                        Err(PrintError::Timeout("printing (attempt took too long)"))
+                    }
+                    Ok(Err(e)) => Err(e),
+                    Err(_) if capped => {
+                        Err(PrintError::Timeout("printing (attempt took too long)"))
+                    }
+                    Err(_) => Err(PrintError::Cancelled),
+                }
+            }
         };
         match res {
             Ok(rep) => break Ok(rep),
             Err(PrintError::Cancelled) => break Err(PrintError::Cancelled),
             Err(e) => {
                 let now = Instant::now();
-                let retry = e.retryable() && now < deadline && now < hard_deadline;
+                let retry = e.retryable() && now < deadline && !shutdown.is_cancelled();
                 let waited = now.duration_since(started).as_secs();
                 {
                     let mut s = lock();
@@ -736,8 +878,18 @@ async fn run_job(
                 if !retry {
                     break Err(e);
                 }
-                tracing::info!(job = id, attempt, "print attempt failed: {e}; retrying");
-                last_err = Some(e);
+                // One journal line per minute while waiting, not one per attempt.
+                if last_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                    tracing::info!(
+                        job = id,
+                        attempt,
+                        waited_s = waited,
+                        "print attempt failed: {e}; retrying until the printer is found"
+                    );
+                    last_log = Some(now);
+                } else {
+                    tracing::debug!(job = id, attempt, "print attempt failed: {e}; retrying");
+                }
                 let backoff = Duration::from_secs(match attempt {
                     1 => 3,
                     2 => 5,
@@ -747,12 +899,11 @@ async fn run_job(
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {},
                     _ = cancel.cancelled() => break Err(PrintError::Cancelled),
-                    _ = shutdown.cancelled() => break Err(PrintError::Cancelled),
+                    _ = shutdown.cancelled() => { by_shutdown = true; break Err(PrintError::Cancelled) },
                 }
             }
         }
     };
-    let _ = last_err;
 
     // ---- terminal state + printer view
     let mut s = lock();
@@ -769,10 +920,11 @@ async fn run_job(
             s.view.last_model = Some(rep.model.clone());
             s.finish(id, JobState::Completed, &["job-completed-successfully"], "");
             s.view.set(up, PrinterState::Idle, &[], "");
+            s.view.sticky_reasons.clear();
             s.view.sticky_since = None;
         }
         Err(PrintError::Cancelled) => {
-            let by_shutdown = shutdown.is_cancelled() && !cancel.is_cancelled();
+            let by_shutdown = by_shutdown || (shutdown.is_cancelled() && !cancel.is_cancelled());
             if by_shutdown {
                 s.finish(
                     id,
@@ -810,16 +962,18 @@ async fn run_job(
                 other => other.kid_message(),
             };
             s.finish(id, JobState::Aborted, reasons, msg.clone());
+            // Live IPP reasons go back to none; the "why" stays visible in /health for a while.
             s.view.set(
                 up,
                 PrinterState::Idle,
-                sticky_reasons,
+                &[],
                 if sticky_reasons.is_empty() {
                     String::new()
                 } else {
                     msg
                 },
             );
+            s.view.sticky_reasons = sticky_reasons.to_vec();
             s.view.sticky_since = if sticky_reasons.is_empty() {
                 None
             } else {
@@ -829,9 +983,14 @@ async fn run_job(
     }
 }
 
-/// Resolves `grace` after shutdown was requested (gives the current job time to finish naturally).
-async fn shutdown_grace(shutdown: &CancellationToken, grace: Duration) {
+/// Resolves when the current attempt should be cancelled because of shutdown: immediately while
+/// the driver is still searching/connecting/preparing (nothing on paper yet), after `grace` once
+/// it is printing (let a short strip finish).
+async fn shutdown_wait(shutdown: &CancellationToken, phase: &AtomicU8, grace: Duration) {
     shutdown.cancelled().await;
+    if phase.load(Ordering::Relaxed) < Phase::Printing as u8 {
+        return;
+    }
     tokio::time::sleep(grace).await;
 }
 
@@ -883,6 +1042,12 @@ impl Store {
                 message: j.message.clone(),
                 name: j.opts.job_name.clone(),
             });
+        let mut reasons = self.view.reasons.clone();
+        for r in &self.view.sticky_reasons {
+            if !reasons.contains(r) {
+                reasons.push(r);
+            }
+        }
         Health {
             version: crate::VERSION,
             uptime_s: self.started.elapsed().as_secs(),
@@ -891,7 +1056,7 @@ impl Store {
                 PrinterState::Processing => "processing",
                 PrinterState::Stopped => "stopped",
             },
-            reasons: self.view.reasons.clone(),
+            reasons,
             message: self.view.message.clone(),
             accepting: self.view.accepting,
             queue_depth: self.queued_count(),
@@ -901,5 +1066,358 @@ impl Store {
             last_model: self.view.last_model.clone(),
             last_job: last,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipp::options::JobOptions;
+    use crate::printer::fake::FakePrinter;
+
+    fn raster() -> Bytes {
+        Bytes::from(
+            std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/tiny-roll48.pwg"
+            ))
+            .unwrap(),
+        )
+    }
+
+    fn cfg() -> EngineConfig {
+        EngineConfig {
+            printer_wait: Duration::from_secs(1),
+            shutdown_grace: Duration::from_millis(300),
+            stale_document: Duration::from_millis(200),
+            error_ttl: Duration::from_millis(300),
+            coop_grace: Duration::from_secs(2),
+            ..EngineConfig::default()
+        }
+    }
+
+    struct Rig {
+        engine: Engine,
+        worker: tokio::task::JoinHandle<()>,
+        shutdown: CancellationToken,
+        dir: tempfile::TempDir,
+    }
+
+    fn rig(cfg: EngineConfig, state: &str) -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("state"), state).unwrap();
+        let printer = Printer::Fake(FakePrinter::new(dir.path()).unwrap());
+        let shutdown = CancellationToken::new();
+        let (engine, worker) = Engine::start(cfg, printer, shutdown.clone());
+        Rig {
+            engine,
+            worker,
+            shutdown,
+            dir,
+        }
+    }
+
+    fn opts(name: &str) -> JobOptions {
+        JobOptions {
+            job_name: name.into(),
+            user: "kid".into(),
+            ..JobOptions::default()
+        }
+    }
+
+    async fn wait_terminal(engine: &Engine, id: u32, max: Duration) -> Job {
+        let t0 = Instant::now();
+        loop {
+            {
+                let s = engine.store();
+                if let Some(j) = s.jobs.get(&id) {
+                    if j.state.is_terminal() {
+                        return Job {
+                            id: j.id,
+                            opts: j.opts.clone(),
+                            doc: None,
+                            format: j.format,
+                            k_octets: j.k_octets,
+                            state: j.state,
+                            reasons: j.reasons.clone(),
+                            message: j.message.clone(),
+                            created: j.created,
+                            created_uptime: j.created_uptime,
+                            processing_uptime: j.processing_uptime,
+                            completed_uptime: j.completed_uptime,
+                            impressions: j.impressions,
+                            impressions_completed: j.impressions_completed,
+                            cancel: j.cancel.clone(),
+                            preview: None,
+                            awaiting_document: j.awaiting_document,
+                            created_at: j.created_at,
+                            last_activity: j.last_activity,
+                            model: j.model.clone(),
+                        };
+                    }
+                }
+            }
+            assert!(t0.elapsed() < max, "job {id} not terminal after {max:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_state(engine: &Engine, id: u32, state: JobState, max: Duration) {
+        let t0 = Instant::now();
+        while engine.store().jobs.get(&id).map(|j| j.state) != Some(state) {
+            assert!(t0.elapsed() < max, "job {id} never reached {state:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn print_job_completes() {
+        let r = rig(cfg(), "ok");
+        let id = r.engine.create_job(opts("hello"), Some(raster())).unwrap();
+        let j = wait_terminal(&r.engine, id, Duration::from_secs(10)).await;
+        assert_eq!(j.state, JobState::Completed);
+        assert_eq!(j.reasons, vec!["job-completed-successfully"]);
+        assert_eq!(j.impressions, 1);
+        assert_eq!(j.impressions_completed, 1);
+        let s = r.engine.store();
+        assert_eq!(s.view.state, PrinterState::Idle);
+        assert!(s.view.reasons.is_empty());
+        assert!(s.view.sticky_reasons.is_empty());
+        assert!(s
+            .view
+            .last_model
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("MXW01"));
+    }
+
+    #[tokio::test]
+    async fn printer_off_gives_up_then_ttl_clears() {
+        let r = rig(cfg(), "off");
+        let id = r.engine.create_job(opts("x"), Some(raster())).unwrap();
+        // while retrying: processing + connecting-to-device + kid message
+        wait_state(&r.engine, id, JobState::Processing, Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let s = r.engine.store();
+            assert_eq!(s.view.state, PrinterState::Processing);
+            assert!(s.view.reasons.contains(&"connecting-to-device"));
+            assert!(s.view.message.contains("Cat printer not found"));
+        }
+        let j = wait_terminal(&r.engine, id, Duration::from_secs(20)).await;
+        assert_eq!(j.state, JobState::Aborted);
+        assert_eq!(j.reasons, vec!["service-off-line"]);
+        assert!(j.message.contains("job"), "{}", j.message);
+        {
+            let s = r.engine.store();
+            // live IPP reasons are clean; the sticky "why" is only for /health
+            assert_eq!(s.view.state, PrinterState::Idle);
+            assert!(s.view.reasons.is_empty());
+            assert_eq!(s.view.sticky_reasons, vec!["offline-report"]);
+            assert!(s.health().reasons.contains(&"offline-report"));
+            assert!(!s.view.message.is_empty());
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        r.engine.store().tick();
+        let s = r.engine.store();
+        assert!(s.view.sticky_reasons.is_empty());
+        assert!(s.view.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flaky_printer_retries_then_prints() {
+        let r = rig(
+            EngineConfig {
+                printer_wait: Duration::from_secs(60),
+                ..cfg()
+            },
+            "flaky:1",
+        );
+        let id = r.engine.create_job(opts("x"), Some(raster())).unwrap();
+        let j = wait_terminal(&r.engine, id, Duration::from_secs(20)).await;
+        assert_eq!(j.state, JobState::Completed);
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_job_is_immediate_and_processing_job_stops_cooperatively() {
+        let r = rig(cfg(), "slow");
+        let a = r.engine.create_job(opts("a"), Some(raster())).unwrap();
+        let b = r.engine.create_job(opts("b"), Some(raster())).unwrap();
+        wait_state(&r.engine, a, JobState::Processing, Duration::from_secs(5)).await;
+        // b is pending: cancel is immediate
+        assert_eq!(r.engine.cancel(b), CancelOutcome::Canceled);
+        let jb = wait_terminal(&r.engine, b, Duration::from_secs(1)).await;
+        assert_eq!(jb.state, JobState::Canceled);
+        assert_eq!(jb.reasons, vec!["job-canceled-by-user"]);
+        assert_eq!(r.engine.cancel(b), CancelOutcome::AlreadyTerminal);
+        assert_eq!(r.engine.cancel(999), CancelOutcome::NotFound);
+        // a is printing (slow = 15 s): cancel → the driver itself returns Cancelled
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(r.engine.cancel(a), CancelOutcome::Canceled);
+        let ja = wait_terminal(&r.engine, a, Duration::from_secs(5)).await;
+        assert_eq!(ja.state, JobState::Canceled);
+        assert!(
+            r.dir.path().join(format!("job-{a}-cancelled.txt")).exists(),
+            "driver did not observe the cancel token itself"
+        );
+        assert_eq!(r.engine.store().view.state, PrinterState::Idle);
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_current_and_pending_and_starts_nothing_new() {
+        let r = rig(cfg(), "slow");
+        let mut ids = vec![];
+        for i in 0..6 {
+            ids.push(
+                r.engine
+                    .create_job(opts(&format!("j{i}")), Some(raster()))
+                    .unwrap(),
+            );
+        }
+        wait_state(
+            &r.engine,
+            ids[0],
+            JobState::Processing,
+            Duration::from_secs(5),
+        )
+        .await;
+        r.engine.begin_shutdown();
+        r.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(10), r.worker)
+            .await
+            .expect("worker stops")
+            .unwrap();
+        {
+            let s = r.engine.store();
+            for id in &ids {
+                let j = &s.jobs[id];
+                assert_eq!(j.state, JobState::Aborted, "job {id}");
+                assert!(j.message.contains("print again"), "{}", j.message);
+                assert!(
+                    j.processing_uptime.is_none() || *id == ids[0],
+                    "job {id} was started"
+                );
+            }
+            assert!(!s.view.accepting);
+        }
+        assert!(matches!(
+            r.engine.create_job(opts("late"), Some(raster())),
+            Err(SubmitError::NotAccepting)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_create_job_aborted_by_tick_but_touch_keeps_it() {
+        let r = rig(cfg(), "ok");
+        let a = r.engine.create_job(opts("a"), None).unwrap();
+        let b = r.engine.create_job(opts("b"), None).unwrap();
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            r.engine.touch(b);
+            r.engine.store().tick();
+        }
+        assert_eq!(r.engine.store().jobs[&a].state, JobState::Aborted);
+        assert_eq!(r.engine.store().jobs[&b].state, JobState::Pending);
+        r.engine.add_document(b, raster()).unwrap();
+        let j = wait_terminal(&r.engine, b, Duration::from_secs(10)).await;
+        assert_eq!(j.state, JobState::Completed);
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_100_terminal_and_5_previews_and_queue_full_is_busy() {
+        let r = rig(
+            EngineConfig {
+                queue_max: 2,
+                ..cfg()
+            },
+            "slow",
+        );
+        let a = r.engine.create_job(opts("a"), Some(raster())).unwrap();
+        let _b = r.engine.create_job(opts("b"), Some(raster())).unwrap();
+        assert!(matches!(
+            r.engine.create_job(opts("c"), Some(raster())),
+            Err(SubmitError::Busy(2))
+        ));
+        assert_eq!(r.engine.cancel(a), CancelOutcome::Canceled);
+        // pruning: fill with cancelled pending jobs
+        drop(r);
+        let r = rig(
+            EngineConfig {
+                queue_max: 500,
+                ..cfg()
+            },
+            "off",
+        );
+        let mut last = 0;
+        for i in 0..130 {
+            let id = r
+                .engine
+                .create_job(opts(&format!("p{i}")), Some(raster()))
+                .unwrap();
+            r.engine.cancel(id);
+            last = id;
+        }
+        let s = r.engine.store();
+        let terminal = s.jobs.values().filter(|j| j.state.is_terminal()).count();
+        assert!(terminal <= KEEP_TERMINAL + 1, "{terminal}");
+        assert!(s.jobs.contains_key(&last));
+        assert!(s.jobs.values().filter(|j| j.preview.is_some()).count() <= KEEP_PREVIEWS);
+    }
+
+    #[tokio::test]
+    async fn identify_is_coalesced() {
+        let r = rig(cfg(), "slow");
+        let a = r.engine.create_job(opts("a"), Some(raster())).unwrap();
+        wait_state(&r.engine, a, JobState::Processing, Duration::from_secs(5)).await;
+        for _ in 0..12 {
+            r.engine.identify();
+        }
+        // a burst never fills the work channel: new jobs still queue instead of aborting
+        let b = r.engine.create_job(opts("b"), Some(raster())).unwrap();
+        assert_eq!(r.engine.store().jobs[&b].state, JobState::Pending);
+        assert_eq!(r.engine.store().identify_requests, 12);
+        assert!(r.engine.store().identify_pending);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_does_not_kill_worker() {
+        let r = rig(cfg(), "panic");
+        let a = r.engine.create_job(opts("boom"), Some(raster())).unwrap();
+        let j = wait_terminal(&r.engine, a, Duration::from_secs(10)).await;
+        assert_eq!(j.state, JobState::Aborted);
+        assert!(j.message.contains("hiccup"), "{}", j.message);
+        assert!(!r.worker.is_finished());
+        std::fs::write(r.dir.path().join("state"), "ok").unwrap();
+        let b = r.engine.create_job(opts("after"), Some(raster())).unwrap();
+        let j = wait_terminal(&r.engine, b, Duration::from_secs(10)).await;
+        assert_eq!(j.state, JobState::Completed);
+        assert_eq!(r.engine.store().view.state, PrinterState::Idle);
+    }
+
+    #[tokio::test]
+    async fn job_ids_are_monotonic_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = || {
+            rig(
+                EngineConfig {
+                    state_dir: Some(dir.path().to_path_buf()),
+                    ..cfg()
+                },
+                "ok",
+            )
+        };
+        let r1 = mk();
+        let a = r1.engine.create_job(opts("a"), Some(raster())).unwrap();
+        let b = r1.engine.create_job(opts("b"), Some(raster())).unwrap();
+        assert!(a > 1_000_000, "time-based ids: {a}");
+        assert_eq!(b, a + 1);
+        drop(r1);
+        let r2 = mk();
+        let c = r2.engine.create_job(opts("c"), Some(raster())).unwrap();
+        assert!(c > b, "{c} > {b}");
+        // and without a state dir the ids still never go backwards in practice
+        let r3 = rig(cfg(), "ok");
+        let d = r3.engine.create_job(opts("d"), Some(raster())).unwrap();
+        assert!(d >= a);
     }
 }

@@ -144,6 +144,10 @@ pub struct ServeArgs {
         default_value = "Bluetooth, wherever the cat printer is"
     )]
     pub location: String,
+    /// Directory for small persistent state (the job-id counter). systemd's `$STATE_DIRECTORY`
+    /// (/var/lib/catprinter) is used when unset.
+    #[arg(long, env = "CATPRINTER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
     #[command(flatten)]
     pub ble: BleArgs,
 }

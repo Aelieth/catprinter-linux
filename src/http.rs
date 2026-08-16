@@ -18,8 +18,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::Engine;
-use crate::ipp::codec::{peek_header, Resp, Status};
-use crate::ipp::IppService;
+use crate::ipp::codec::{parse_contained, peek_header, Resp, Status};
+use crate::ipp::{IppService, OP_CLOSE_JOB, OP_SEND_DOCUMENT};
 
 /// Shared state for request handlers.
 pub struct AppState {
@@ -30,9 +30,30 @@ pub struct AppState {
     pub dnssd: Arc<RwLock<serde_json::Value>>,
     /// Extra JSON merged into /health (adapter state etc.).
     pub extra_health: Arc<RwLock<serde_json::Value>>,
+    /// A request body that sends nothing for this long is dropped (408).
+    pub body_idle: Duration,
+    /// Hard cap on the total time one request body may take.
+    pub body_total: Duration,
 }
 
-const BODY_TIMEOUT: Duration = Duration::from_secs(300);
+impl AppState {
+    pub fn new(ipp: Arc<IppService>, engine: Engine, max_body: usize) -> Self {
+        AppState {
+            ipp,
+            engine,
+            max_body,
+            dnssd: Arc::new(RwLock::new(serde_json::json!({}))),
+            extra_health: Arc::new(RwLock::new(serde_json::json!({}))),
+            body_idle: Duration::from_secs(120),
+            body_total: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+/// Only the first bytes of a streaming body are worth parsing to learn the job id.
+const PEEK_LIMIT: usize = 64 * 1024;
+/// How often a still-streaming Send-Document refreshes the job's activity stamp.
+const TOUCH_EVERY: Duration = Duration::from_secs(5);
 
 pub async fn run(
     listener: TcpListener,
@@ -136,42 +157,85 @@ async fn ipp_post(req: Request<Incoming>, st: &AppState) -> Out {
             .and_then(|f| f.into_data().ok());
         return oversize(head.as_deref());
     }
-    // Stream frames up to the cap.
-    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(64 * 1024).min(max));
-    let collect = async {
-        while let Some(frame) = body.frame().await {
-            let frame = match frame {
-                Ok(f) => f,
-                Err(e) => return Err(format!("body read: {e}")),
-            };
-            if let Ok(data) = frame.into_data() {
-                if buf.len() + data.len() > max {
-                    buf.extend_from_slice(&data[..(max - buf.len()).min(data.len())]);
-                    return Ok(false);
-                }
-                buf.extend_from_slice(&data);
+    // Stream frames up to the cap. The CUPS backend streams a Send-Document while the filters
+    // still render (minutes for a big PDF): the timer is per-frame idleness, not total time,
+    // and the job's activity stamp is refreshed so the stale-Create-Job sweeper leaves it alone.
+    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(64 * 1024).min(4 * 1024 * 1024));
+    let started = std::time::Instant::now();
+    let mut touched: Option<u32> = None;
+    let mut peek_failed = false;
+    let mut last_touch = started;
+    loop {
+        let frame = match tokio::time::timeout(st.body_idle, body.frame()).await {
+            Err(_) => {
+                return respond(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "text/plain",
+                    "request body timeout\n",
+                )
             }
-        }
-        Ok(true)
-    };
-    match tokio::time::timeout(BODY_TIMEOUT, collect).await {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return oversize(Some(&buf)),
-        Ok(Err(e)) => {
-            tracing::debug!("{e}");
-            return respond(StatusCode::BAD_REQUEST, "text/plain", "bad request body\n");
-        }
-        Err(_) => {
+            Ok(None) => break,
+            Ok(Some(Err(e))) => {
+                tracing::debug!("body read: {e}");
+                return respond(StatusCode::BAD_REQUEST, "text/plain", "bad request body\n");
+            }
+            Ok(Some(Ok(f))) => f,
+        };
+        if started.elapsed() > st.body_total {
             return respond(
                 StatusCode::REQUEST_TIMEOUT,
                 "text/plain",
-                "request body timeout\n",
-            )
+                "request body took too long\n",
+            );
+        }
+        if let Ok(data) = frame.into_data() {
+            if buf.len() + data.len() > max {
+                buf.extend_from_slice(&data[..(max - buf.len()).min(data.len())]);
+                return oversize(Some(&buf));
+            }
+            buf.extend_from_slice(&data);
+        }
+        match touched {
+            None if !peek_failed && buf.len() <= PEEK_LIMIT => {
+                if let Some(id) = peek_job_id(&buf) {
+                    st.engine.touch(id);
+                    touched = Some(id);
+                    last_touch = std::time::Instant::now();
+                }
+            }
+            None => peek_failed = true,
+            Some(id) => {
+                if last_touch.elapsed() >= TOUCH_EVERY {
+                    st.engine.touch(id);
+                    last_touch = std::time::Instant::now();
+                }
+            }
         }
     }
     let out = st.ipp.handle(Bytes::from(buf));
     let status = StatusCode::from_u16(out.http_status).unwrap_or(StatusCode::OK);
     respond(status, "application/ipp", out.body)
+}
+
+/// If the bytes so far already hold a complete attribute section of a Send-Document / Close-Job,
+/// return its job-id (the operation attributes come first, so this succeeds on the first frame
+/// or two of a multi-megabyte document; a partial attribute section simply parses as an error).
+fn peek_job_id(buf: &[u8]) -> Option<u32> {
+    let req = parse_contained(Bytes::copy_from_slice(buf)).ok()?;
+    if req.op != OP_SEND_DOCUMENT && req.op != OP_CLOSE_JOB {
+        return None;
+    }
+    if let Some(i) = req.get_int(
+        Some(crate::ipp::codec::Group::OperationAttributes),
+        "job-id",
+    ) {
+        return u32::try_from(i).ok();
+    }
+    let uri = req.get_str(
+        Some(crate::ipp::codec::Group::OperationAttributes),
+        "job-uri",
+    )?;
+    uri.rsplit('/').next()?.parse().ok()
 }
 
 fn oversize(head: Option<&[u8]>) -> Out {
@@ -258,7 +322,7 @@ fn status_page(st: &AppState) -> Out {
         msg = esc(&h.message),
         qd = h.queue_depth,
         jt = h.jobs_total,
-        lm = h.last_model.as_deref().unwrap_or("—"),
+        lm = esc(h.last_model.as_deref().unwrap_or("—")),
         bat = h.battery.map(|b| format!("{b}%")).unwrap_or_else(|| "—".into()),
         uri = st.ipp.cfg.printer_uri(),
         rows = jobs.join("")
@@ -374,4 +438,291 @@ pub fn icon_png(size: u32) -> Result<Vec<u8>> {
     let mut out = std::io::Cursor::new(Vec::new());
     img.write_to(&mut out, image::ImageFormat::Png)?;
     Ok(out.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Engine, EngineConfig};
+    use crate::ipp::codec::{parse, v_charset, v_lang, v_mime, v_uri, Group};
+    use crate::ipp::{PrinterConfig, OP_CREATE_JOB, OP_SEND_DOCUMENT};
+    use crate::printer::fake::FakePrinter;
+    use crate::printer::Printer;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    fn ipp_msg(
+        op: u16,
+        id: i32,
+        op_attrs: &[(&str, ipp::value::IppValue)],
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend(0x0200u16.to_be_bytes());
+        b.extend(op.to_be_bytes());
+        b.extend(id.to_be_bytes());
+        b.push(0x01);
+        for (n, v) in op_attrs {
+            let a = ipp::attribute::IppAttribute::new(
+                ipp::value::IppName::new_truncated(*n),
+                v.clone(),
+            );
+            b.extend(a.to_bytes());
+        }
+        b.push(0x03);
+        b.extend(payload);
+        b
+    }
+
+    fn base_attrs() -> Vec<(&'static str, ipp::value::IppValue)> {
+        vec![
+            ("attributes-charset", v_charset("utf-8")),
+            ("attributes-natural-language", v_lang("en")),
+            ("printer-uri", v_uri("ipp://127.0.0.1/ipp/print")),
+        ]
+    }
+
+    struct Server {
+        addr: std::net::SocketAddr,
+        shutdown: CancellationToken,
+        handle: tokio::task::JoinHandle<()>,
+        engine: Engine,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn server_with(mut app: impl FnMut(&mut AppState)) -> Server {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("state"), "ok").unwrap();
+        let printer = Printer::Fake(FakePrinter::new(dir.path()).unwrap());
+        let shutdown = CancellationToken::new();
+        let cfg = EngineConfig {
+            stale_document: Duration::from_millis(200),
+            printer_wait: Duration::from_secs(2),
+            ..EngineConfig::default()
+        };
+        let (engine, _worker) = Engine::start(cfg, printer, shutdown.clone());
+        let pcfg = PrinterConfig {
+            name: "CatPrinter".into(),
+            info: "Cat Printer".into(),
+            location: "here".into(),
+            make_model: "Cat Printer MXW01".into(),
+            model_label: "MXW01".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            uuid: Arc::new(RwLock::new("urn:uuid:0".into())),
+            resolutions: vec![203],
+            max_document_kb: 65536,
+            max_copies: 10,
+            started: std::time::SystemTime::now(),
+        };
+        let ipp = Arc::new(IppService::new(engine.clone(), pcfg));
+        let mut state = AppState::new(ipp, engine.clone(), 2 * 1024 * 1024);
+        app(&mut state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sd = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            let _ = run(listener, Arc::new(state), sd).await;
+        });
+        // give the accept loop a moment
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Server {
+            addr,
+            shutdown,
+            handle,
+            engine,
+            _dir: dir,
+        }
+    }
+
+    async fn server() -> Server {
+        server_with(|_| {}).await
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            self.handle.abort();
+        }
+    }
+
+    /// Send a full HTTP request, return (status_line, headers, body).
+    async fn http_post(addr: std::net::SocketAddr, body: &[u8]) -> (u16, Vec<u8>) {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let head = format!(
+            "POST /ipp/print HTTP/1.1\r\nHost: x\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(body).await.unwrap();
+        read_http(s).await
+    }
+
+    async fn read_http(mut s: TcpStream) -> (u16, Vec<u8>) {
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.unwrap();
+        let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..sep]);
+        let status: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        // de-chunk if needed
+        let body = &raw[sep + 4..];
+        let body = if head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked")
+        {
+            dechunk(body)
+        } else {
+            body.to_vec()
+        };
+        (status, body)
+    }
+
+    fn dechunk(mut b: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(nl) = b.windows(2).position(|w| w == b"\r\n") {
+            let n = usize::from_str_radix(std::str::from_utf8(&b[..nl]).unwrap().trim(), 16)
+                .unwrap_or(0);
+            b = &b[nl + 2..];
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&b[..n]);
+            b = &b[n + 2..];
+        }
+        out
+    }
+
+    fn ipp_status(body: &[u8]) -> u16 {
+        u16::from_be_bytes([body[2], body[3]])
+    }
+
+    fn raster() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tiny-roll48.pwg"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_health_root_icons_strings_and_404() {
+        let srv = server().await;
+        for (path, want) in [
+            ("/health", 200),
+            ("/", 200),
+            ("/strings/en.strings", 200),
+            ("/icons/48.png", 200),
+            ("/nope", 404),
+        ] {
+            let mut s = TcpStream::connect(srv.addr).await.unwrap();
+            let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let (status, _body) = read_http(s).await;
+            assert_eq!(status, want, "GET {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn content_length_over_cap_gets_too_long_and_connection_close() {
+        let srv = server_with(|st| st.max_body = 4096).await;
+        let mut s = TcpStream::connect(srv.addr).await.unwrap();
+        let body_len = 100_000usize;
+        let head = format!(
+            "POST /ipp/print HTTP/1.1\r\nHost: x\r\nContent-Type: application/ipp\r\nContent-Length: {body_len}\r\n\r\n"
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        // a valid-looking header so the daemon can echo the request id
+        let msg = ipp_msg(OP_CREATE_JOB, 7, &base_attrs(), b"");
+        s.write_all(&msg).await.unwrap();
+        let (status, body) = read_http(s).await;
+        assert_eq!(status, 200);
+        assert_eq!(ipp_status(&body), 0x0409); // request-value-too-long
+    }
+
+    #[tokio::test]
+    async fn body_idle_timeout_returns_408() {
+        let srv = server_with(|st| st.body_idle = Duration::from_millis(300)).await;
+        let mut s = TcpStream::connect(srv.addr).await.unwrap();
+        // promise a big body, then stall
+        let head = "POST /ipp/print HTTP/1.1\r\nHost: x\r\nContent-Type: application/ipp\r\nContent-Length: 100000\r\n\r\n";
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(&ipp_msg(OP_CREATE_JOB, 8, &base_attrs(), b""))
+            .await
+            .unwrap();
+        // do not send the rest
+        let (status, _body) = read_http(s).await;
+        assert_eq!(status, 408);
+    }
+
+    #[tokio::test]
+    async fn streaming_send_document_slower_than_stale_window_prints() {
+        let srv = server().await;
+        // Create-Job
+        let (st, body) = http_post(
+            srv.addr,
+            &ipp_msg(
+                OP_CREATE_JOB,
+                1,
+                &[
+                    ("attributes-charset", v_charset("utf-8")),
+                    ("attributes-natural-language", v_lang("en")),
+                    ("printer-uri", v_uri("ipp://127.0.0.1/ipp/print")),
+                    ("document-format", v_mime("image/pwg-raster")),
+                ],
+                b"",
+            ),
+        )
+        .await;
+        assert_eq!(st, 200);
+        let back = parse(Bytes::from(body)).unwrap();
+        let id = back.get_int(Some(Group::JobAttributes), "job-id").unwrap();
+        // Send-Document, dribbled slower than stale_document (200 ms) so the touch path is exercised
+        let doc = raster();
+        let msg = ipp_msg(
+            OP_SEND_DOCUMENT,
+            2,
+            &[
+                ("attributes-charset", v_charset("utf-8")),
+                ("attributes-natural-language", v_lang("en")),
+                ("printer-uri", v_uri("ipp://127.0.0.1/ipp/print")),
+                ("job-id", ipp::value::IppValue::Integer(id)),
+                ("last-document", ipp::value::IppValue::Boolean(true)),
+            ],
+            &doc,
+        );
+        let total = msg.len();
+        let mut s = TcpStream::connect(srv.addr).await.unwrap();
+        let head = format!(
+            "POST /ipp/print HTTP/1.1\r\nHost: x\r\nContent-Type: application/ipp\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        // header first so the job-id peek fires, then the document in slow chunks
+        let split = msg.len().min(64);
+        s.write_all(&msg[..split]).await.unwrap();
+        let mut off = split;
+        while off < total {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let end = (off + 4096).min(total);
+            s.write_all(&msg[off..end]).await.unwrap();
+            off = end;
+        }
+        let (status, resp) = read_http(s).await;
+        assert_eq!(status, 200);
+        assert_eq!(ipp_status(&resp), 0x0000);
+        // job should not have been aborted as stale; it prints
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let state = srv.engine.store().jobs.get(&(id as u32)).map(|j| j.state);
+            if state == Some(crate::engine::JobState::Completed) {
+                return;
+            }
+            assert_ne!(
+                state,
+                Some(crate::engine::JobState::Aborted),
+                "stale-aborted"
+            );
+        }
+        panic!("streamed job never completed");
+    }
 }

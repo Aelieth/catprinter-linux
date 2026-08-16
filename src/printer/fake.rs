@@ -64,6 +64,8 @@ impl FakePrinter {
                 "The cat printer battery is low. Charge it.",
             ))),
             "adapter-off" => Some(PrintError::AdapterOff),
+            // test hook: a panic inside the print path must not kill the worker
+            "panic" => panic!("fake printer: scripted panic"),
             s if s.starts_with("flaky:") => {
                 let n: u32 = s[6..].trim().parse().unwrap_or(0);
                 if n == 0 {
@@ -83,6 +85,21 @@ impl FakePrinter {
     }
 
     pub async fn print(
+        &mut self,
+        job: &PreparedJob,
+        cancel: &CancellationToken,
+        progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<PrintReport, PrintError> {
+        let r = self.print_inner(job, cancel, progress).await;
+        if matches!(r, Err(PrintError::Cancelled)) {
+            // Marker for tests: the driver observed the token and stopped by itself (as opposed
+            // to its future being dropped from the outside).
+            let _ = std::fs::write(self.dir.join(format!("job-{}-cancelled.txt", job.id)), "");
+        }
+        r
+    }
+
+    async fn print_inner(
         &mut self,
         job: &PreparedJob,
         cancel: &CancellationToken,

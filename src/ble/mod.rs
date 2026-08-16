@@ -4,6 +4,7 @@
 //! strip for that model, drive the family sequence for each copy, then always disconnect.
 
 pub mod bluez;
+pub mod cleanup;
 pub mod discovery;
 pub mod seqpacket;
 pub mod session;
