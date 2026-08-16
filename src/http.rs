@@ -34,6 +34,10 @@ pub struct AppState {
     pub body_idle: Duration,
     /// Hard cap on the total time one request body may take.
     pub body_total: Duration,
+    /// Poked (via `/health?refresh`) so the uuid adopter re-checks the CUPS queue immediately —
+    /// ensure-queue calls it right after creating the queue so the DNS-SD UUID converges in
+    /// seconds instead of on the adopter's slow backoff.
+    pub adopt_now: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -46,6 +50,7 @@ impl AppState {
             extra_health: Arc::new(RwLock::new(serde_json::json!({}))),
             body_idle: Duration::from_secs(120),
             body_total: Duration::from_secs(30 * 60),
+            adopt_now: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -255,6 +260,7 @@ fn oversize(head: Option<&[u8]>) -> Out {
 
 fn health(st: &AppState, query: &str) -> Out {
     if query.contains("refresh") {
+        st.adopt_now.notify_one();
         // hint for the uuid adopter (cheap; it polls anyway)
         st.engine.store().tick();
     }

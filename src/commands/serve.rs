@@ -144,6 +144,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     // ---- side tasks (tracked so shutdown can wait for them to wind down)
     let tracker = TaskTracker::new();
+    let adopt_now = std::sync::Arc::new(tokio::sync::Notify::new());
     let (uuid_tx, uuid_rx) = tokio::sync::watch::channel(uuid.read().unwrap().clone());
     crate::cupsq::OUR_PORT.store(args.port, std::sync::atomic::Ordering::Relaxed);
     if args.uuid.is_none() {
@@ -151,6 +152,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             args.queue.clone(),
             uuid.clone(),
             uuid_tx,
+            adopt_now.clone(),
             shutdown.clone(),
         );
         tracker.spawn(adopt);
@@ -194,6 +196,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let state = Arc::new(AppState {
         dnssd: dnssd_status,
         extra_health,
+        adopt_now: adopt_now.clone(),
         ..AppState::new(
             ipp.clone(),
             engine.clone(),

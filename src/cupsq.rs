@@ -155,14 +155,18 @@ pub async fn adopt_uuid_task(
     queue: String,
     uuid: Arc<RwLock<String>>,
     tx: tokio::sync::watch::Sender<String>,
+    adopt_now: Arc<tokio::sync::Notify>,
     shutdown: CancellationToken,
 ) {
     let mut delays = [5u64, 15, 30, 60, 120, 300].into_iter();
     let mut logged = false;
     loop {
         let wait = delays.next().unwrap_or(600);
+        // Slow backoff normally, but `/health?refresh` (ensure-queue after creating the queue)
+        // wakes us at once so the DNS-SD UUID lines up within a second or two at first boot.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(wait)) => {},
+            _ = adopt_now.notified() => { delays = [5u64, 15, 30, 60, 120, 300].into_iter(); }
             _ = shutdown.cancelled() => return,
         }
         let our_port = OUR_PORT.load(std::sync::atomic::Ordering::Relaxed);

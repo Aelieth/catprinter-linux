@@ -60,6 +60,19 @@ fn spawn_daemon(extra: &[&str]) -> Daemon {
     panic!("daemon did not start");
 }
 
+/// When CATPRINTER_REQUIRE_IPPTOOL=1 (set in CI), the ipptool suites must run — a missing
+/// ipptool becomes a hard failure instead of a silent skip, so CI can't go green testing nothing.
+fn require_or_skip() -> bool {
+    if ipptool_available() {
+        return true;
+    }
+    if std::env::var("CATPRINTER_REQUIRE_IPPTOOL").as_deref() == Ok("1") {
+        panic!("ipptool / /usr/share/cups/ipptool/ipp-everywhere.test not found but CATPRINTER_REQUIRE_IPPTOOL=1");
+    }
+    eprintln!("ipptool not available — skipping");
+    false
+}
+
 fn ipptool_available() -> bool {
     Command::new("ipptool")
         .arg("--help")
@@ -126,8 +139,7 @@ fn ureq_get(port: u16, path: &str) -> String {
 
 #[test]
 fn ipp_everywhere_suite_passes() {
-    if !ipptool_available() {
-        eprintln!("ipptool not available — skipping");
+    if !require_or_skip() {
         return;
     }
     let d = spawn_daemon(&[]);
@@ -180,7 +192,7 @@ fn ipp_everywhere_suite_passes() {
 
 #[test]
 fn cups_suites_pass() {
-    if !ipptool_available() {
+    if !require_or_skip() {
         return;
     }
     let d = spawn_daemon(&[]);
@@ -205,7 +217,7 @@ fn cups_suites_pass() {
 
 #[test]
 fn printer_off_then_on_and_give_up() {
-    if !ipptool_available() {
+    if !require_or_skip() {
         return;
     }
     let d = spawn_daemon(&["--printer-wait", "4"]);

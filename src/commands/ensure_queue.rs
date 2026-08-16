@@ -46,8 +46,26 @@ async fn health_ok(port: u16) -> bool {
     text.starts_with("HTTP/1.1 200") && text.contains("\"version\"")
 }
 
+/// CUPS printer names: printable ASCII, no space/tab and none of / # ?, 1..=127 chars, and not
+/// starting with `-` (which would be read as an lpadmin option). Reject rather than shell-quote.
+fn valid_queue_name(q: &str) -> bool {
+    !q.is_empty()
+        && q.len() <= 127
+        && !q.starts_with('-')
+        && q.bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'#' | b'?'))
+}
+
 pub async fn ensure_queue(a: EnsureQueueArgs) -> i32 {
     let queue = a.queue.clone();
+    if !valid_queue_name(&queue) {
+        eprintln!("✘ invalid queue name {queue:?} (printable ASCII, no / # ? or spaces, ≤127, no leading '-')");
+        return 1;
+    }
+    if a.location.starts_with('-') {
+        eprintln!("✘ location must not start with '-'");
+        return 1;
+    }
     let uri = format!("ipp://127.0.0.1:{}/ipp/print", a.port);
     if a.remove {
         let (ok, out) = run("lpadmin", &["-x", &queue]);
@@ -87,16 +105,34 @@ pub async fn ensure_queue(a: EnsureQueueArgs) -> i32 {
     }
     // existing queue?
     let (_, v) = run("lpstat", &["-v", &queue]);
-    if let Some(dev) = v
+    let current_dev = v
         .lines()
         .filter(|l| l.starts_with("device for "))
-        .find_map(|l| l.split_once(": ").map(|(_, d)| d.trim().to_string()))
-    {
-        if dev != uri {
-            println!("• queue {queue} pointed at {dev}; repointing to {uri}");
+        .find_map(|l| l.split_once(": ").map(|(_, d)| d.trim().to_string()));
+    let ppd_path = format!("/etc/cups/ppd/{queue}.ppd");
+    let ppd_ok = std::fs::read_to_string(&ppd_path)
+        .map(|p| p.contains("*PageSize 48x297mm"))
+        .unwrap_or(false);
+    let stamp_path = "/var/lib/catprinter/queue.stamp";
+    let want_stamp = format!("{}|{}|{}", crate::VERSION, uri, a.location);
+    let stamp_ok = std::fs::read_to_string(stamp_path)
+        .map(|c| c.trim() == want_stamp)
+        .unwrap_or(false);
+    // Skip regenerating the PPD when nothing changed: re-running `lpadmin -m everywhere` every
+    // boot rewrites the PPD and resets any per-printer `lpadmin -o` defaults an admin set.
+    if current_dev.as_deref() == Some(uri.as_str()) && ppd_ok && stamp_ok {
+        let (_, _) = run("cupsenable", &[&queue]);
+        let (_, _) = run("cupsaccept", &[&queue]);
+        println!("✔ queue {queue} already correct (skipping lpadmin -m everywhere)");
+        poke_refresh(a.port).await;
+        return 0;
+    }
+    match &current_dev {
+        Some(dev) if dev != &uri => {
+            println!("• queue {queue} pointed at {dev}; repointing to {uri}")
         }
-    } else {
-        println!("• queue {queue} does not exist yet; creating");
+        Some(_) => println!("• queue {queue} exists; refreshing (PPD or version changed)"),
+        None => println!("• queue {queue} does not exist yet; creating"),
     }
     // lpadmin -m everywhere (cupsd fetches our attributes and generates the PPD)
     let mut last = String::new();
@@ -156,6 +192,45 @@ pub async fn ensure_queue(a: EnsureQueueArgs) -> i32 {
     if d.contains(&format!("destination: {queue}")) {
         eprintln!("!! {queue} is the SYSTEM DEFAULT printer — homework would land on 48 mm tape. Fix: lpadmin -d <other-printer>");
     }
+    // Record what we just made so the next boot can skip the PPD rebuild.
+    let _ = std::fs::create_dir_all("/var/lib/catprinter");
+    if let Err(e) = std::fs::write(stamp_path, format!("{want_stamp}\n")) {
+        tracing::debug!("could not write {stamp_path}: {e}");
+    }
+    poke_refresh(a.port).await;
     println!("✔ queue {queue} → {uri}");
     0
+}
+
+/// Nudge the running daemon to adopt this queue's uuid now (GET /health?refresh); best-effort.
+async fn poke_refresh(port: u16) {
+    use tokio::io::AsyncWriteExt;
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        s.write_all(
+            format!("GET /health?refresh HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .ok()?;
+        Some(())
+    })
+    .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_queue_name;
+
+    #[test]
+    fn queue_name_validation() {
+        assert!(valid_queue_name("CatPrinter"));
+        assert!(valid_queue_name("cat_printer-2"));
+        assert!(!valid_queue_name(""));
+        assert!(!valid_queue_name("-x")); // option injection
+        assert!(!valid_queue_name("has space"));
+        assert!(!valid_queue_name("a/b"));
+        assert!(!valid_queue_name("a#b"));
+        assert!(!valid_queue_name(&"q".repeat(200)));
+    }
 }
