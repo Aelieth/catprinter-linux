@@ -222,7 +222,34 @@ fn cups_suites_pass() {
         .expect("fake printer wrote no job-*.json");
     let json = std::fs::read_to_string(&job_json).unwrap();
     assert!(json.contains("\"width\": 384"), "{json}");
-    assert!(d.dir.path().join("identify-1.txt").exists());
+    // Identify-Printer is fire-and-forget on the worker (IPP returns before the
+    // fake printer writes). Later suites in this list enqueue more print jobs, so
+    // the marker may appear a beat after ipptool exits — poll, and glob any
+    // identify-*.txt (same class of flake as the old job-1.json assert).
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let ident = loop {
+        let found = std::fs::read_dir(d.dir.path())
+            .unwrap()
+            .flatten()
+            .find(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("identify-") && n.ends_with(".txt")
+            });
+        if found.is_some() || Instant::now() >= deadline {
+            break found;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        ident.is_some(),
+        "fake printer wrote no identify-*.txt; dir={:?}",
+        std::fs::read_dir(d.dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
