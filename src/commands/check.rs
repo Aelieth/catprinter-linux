@@ -1,5 +1,7 @@
 //! `catprinterd check`: is the system ready to print? D-Bus, bluetoothd, a powered adapter, and
-//! whether our port is free or already answered by a running daemon. Exit 0 only when ready.
+//! whether our port is free or already answered by a running daemon. Also prints read-only host
+//! facts (TemporaryTimeout, combo card, USB BT power/control) that do not affect READY.
+//! Exit 0 only when ready.
 
 use std::time::Duration;
 
@@ -73,7 +75,13 @@ pub async fn run(args: CheckArgs) -> i32 {
                 ready = false;
             }
         }
+    } else {
+        println!("{:<16} MISSING — no system D-Bus", "bluetoothd");
+        println!("{:<16} unknown — no system D-Bus", "adapter");
     }
+
+    // Read-only host facts: never change READY vs NOT READY.
+    print_host_facts();
 
     // Port.
     let addr = format!("127.0.0.1:{}", args.port);
@@ -108,6 +116,13 @@ pub async fn run(args: CheckArgs) -> i32 {
         0
     } else {
         1
+    }
+}
+
+fn print_host_facts() {
+    let facts = crate::ble::host::collect_default();
+    for (label, value) in facts.check_lines() {
+        println!("{:<16} {value}", label);
     }
 }
 

@@ -74,8 +74,9 @@ Never make CatPrinter the *default* printer (homework on 48 mm tape); `install.s
 | queue missing / daemon down | `sudo ./install.sh status`, `journalctl -u catprinter -u catprinter-queue`, `sudo ./install.sh update` |
 | two "Cat Printer" entries in the dialog | the daemon adopts the CUPS queue's uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
 
-`catprinterd check` (Bluetooth adapter / bluetoothd / port) and `catprinterd status` (connects to the
-printer, reports model, battery, paper) are handy on the console.
+`catprinterd check` (Bluetooth adapter / bluetoothd / port, plus read-only host facts:
+TemporaryTimeout, combo-card heuristic, USB BT `power/control`) and `catprinterd status`
+(connects to the printer, reports model, battery, paper) are handy on the console.
 
 ## Developing
 
@@ -108,9 +109,13 @@ cargo run -- print file.png --preview-only out.png # render only
   `KEEP=1` keeps the containers, `FLEET_FIRST_BOOT=1` adds the preset/first-boot variant, logs
   land in `tests/out/fleet/`. From a distrobox: `PODMAN="distrobox-host-exec podman"` (rootless
   works; the machines come up `degraded` because of `/sys/kernel/*` mounts, which is accepted).
-* Hardware notes (MXW01, this project): connects reliably at MTU 512; at weak signal (≈ −80 dBm)
-  BlueZ often aborts the first connect (`le-connection-abort-by-local`) — the daemon retries
-  (3 attempts per round, rounds until `CATPRINTER_PRINTER_WAIT`). Strips longer than 4000 lines
+* Hardware notes (MXW01, this project): connects reliably at MTU 512. The printer is never
+  paired, so BlueZ may delete its Device1 object after `TemporaryTimeout` (default 30 s);
+  every Connect re-resolves a live path by address instead of reusing the discovery-time
+  object. Combo Wi-Fi/BT cards also abort pending connects (`le-connection-abort-by-local`);
+  the daemon classifies prune / host-abort / timeout / adapter-off, waits longer after a
+  host abort, and refreshes LE discovery after prune or abort. It still retries 3 attempts
+  per round (12 s each) until `CATPRINTER_PRINTER_WAIT`. Strips longer than 4000 lines
   (multi-request segments) and the "Bluetooth Settings holds the link" path are implemented but
   were not exercised on hardware. Machines with more than one Bluetooth adapter: the daemon uses
   the first powered adapter; pin one with `CATPRINTER_ADAPTER=hci1` in `/etc/catprinter/env`, and

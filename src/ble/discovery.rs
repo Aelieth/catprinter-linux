@@ -199,17 +199,9 @@ pub fn choose_adapter(objs: &Objects, want: Option<&str>) -> Result<AdapterInfo,
         .ok_or(PrintError::AdapterOff)
 }
 
-/// LE scan for a matching device: SetDiscoveryFilter(Transport=le) + StartDiscovery, poll the
-/// object tree, return the best match. Discovery is left RUNNING on purpose (connect while
-/// scanning; stopping first makes BlueZ page-timeout on these toys) — the caller stops it later.
-pub async fn scan(
-    conn: &Connection,
-    adapter: &AdapterInfo,
-    hint: Option<&DeviceHint>,
-    avoid: &[String],
-    timeout: Duration,
-) -> Result<Candidate, PrintError> {
-    let ad = bluez::adapter_proxy(conn, &adapter.path).await?;
+/// SetDiscoveryFilter(Transport=le) + StartDiscovery. `InProgress` is success (already scanning).
+pub async fn start_le_discovery(conn: &Connection, adapter_path: &str) -> Result<(), PrintError> {
+    let ad = bluez::adapter_proxy(conn, adapter_path).await?;
     let mut filter: HashMap<&str, Value<'_>> = HashMap::new();
     filter.insert("Transport", Value::from("le"));
     filter.insert("DuplicateData", Value::from(true));
@@ -222,11 +214,38 @@ pub async fn scan(
         Err(_) => tracing::debug!("set_discovery_filter timed out (scanning unfiltered)"),
     }
     match tokio::time::timeout(bluez::CALL_TIMEOUT, ad.start_discovery()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) if bluez::is_error_named(&e, "org.bluez.Error.InProgress") => {}
-        Ok(Err(e)) => return Err(bluez::map_err(e, "starting the Bluetooth scan")),
-        Err(_) => return Err(PrintError::Timeout("starting the Bluetooth scan")),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) if bluez::is_error_named(&e, "org.bluez.Error.InProgress") => Ok(()),
+        Ok(Err(e)) => Err(bluez::map_err(e, "starting the Bluetooth scan")),
+        Err(_) => Err(PrintError::Timeout("starting the Bluetooth scan")),
     }
+}
+
+/// Restart LE discovery so BlueZ can recreate a TemporaryTimeout-pruned Device1.
+/// Discovery is running again before this returns (scan-while-connecting stays the rule).
+pub async fn refresh_le_discovery(conn: &Connection, adapter_path: &str) {
+    stop_scan(conn, adapter_path).await;
+    // Tiny gap so BlueZ drops the old session; do not linger — the next Connect wants scan on.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    if let Err(e) = start_le_discovery(conn, adapter_path).await {
+        tracing::debug!("LE discovery refresh: {e}");
+        let _ = start_le_discovery(conn, adapter_path).await;
+    }
+    // Advertisements recreate temporary objects within a few hundred ms.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
+/// LE scan for a matching device: SetDiscoveryFilter(Transport=le) + StartDiscovery, poll the
+/// object tree, return the best match. Discovery is left RUNNING on purpose (connect while
+/// scanning; stopping first makes BlueZ page-timeout on these toys) — the caller stops it later.
+pub async fn scan(
+    conn: &Connection,
+    adapter: &AdapterInfo,
+    hint: Option<&DeviceHint>,
+    avoid: &[String],
+    timeout: Duration,
+) -> Result<Candidate, PrintError> {
+    start_le_discovery(conn, &adapter.path).await?;
     let deadline = Instant::now() + timeout;
     let mut best: Option<Candidate> = None;
     let mut settle_until: Option<Instant> = None;

@@ -543,6 +543,12 @@ mod tests {
     // --- crc8 (uses the shared table) ---
 
     #[test]
+    fn connect_attempt_constants_are_the_public_contract() {
+        assert_eq!(CONNECT_TIMEOUT_S, 12);
+        assert_eq!(CONNECT_ATTEMPTS, 3);
+    }
+
+    #[test]
     fn crc8_empty_and_zero() {
         assert_eq!(crc8(&[]), 0x00);
         assert_eq!(crc8(&[0x00]), 0x00);

@@ -28,7 +28,7 @@ pub struct Cli {
 pub enum Cmd {
     /// Run the IPP printer daemon (default).
     Serve(ServeArgs),
-    /// Health check: D-Bus, bluetoothd, adapters, port. Exit 1 when not ready.
+    /// Health check: D-Bus, bluetoothd, adapters, port, plus read-only BlueZ/USB host facts. Exit 1 when not ready.
     Check(CheckArgs),
     /// Connect to the printer and report model / battery / paper.
     Status(BleArgs),

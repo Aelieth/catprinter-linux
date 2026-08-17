@@ -87,7 +87,7 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 | Cat printer not found for N min — job stopped | The wait window expired; turn the printer on and print again. |
 | Print would be N m long; limit … | Split the document or pick a shorter page size. |
 | Two Cat Printers in the dialog | `sudo ./install.sh update` (re-aligns the DNS-SD uuid), or `CATPRINTER_DNSSD=off`. |
-| Nothing prints, queue idle | `sudo ./install.sh status`; `journalctl -u catprinter -n 50`; `catprinterd check`. |
+| Nothing prints, queue idle | `sudo ./install.sh status`; `journalctl -u catprinter -n 50`; `catprinterd check` (also prints TemporaryTimeout, combo, USB BT power/control). |
 | Job stuck | `cancel -a CatPrinter`; `sudo systemctl restart catprinter`. |
 
 ## Image-baked install (custom uBlue image)

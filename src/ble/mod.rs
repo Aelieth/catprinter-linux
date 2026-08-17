@@ -6,6 +6,7 @@
 pub mod bluez;
 pub mod cleanup;
 pub mod discovery;
+pub mod host;
 pub mod seqpacket;
 pub mod session;
 

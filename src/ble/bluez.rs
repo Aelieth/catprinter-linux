@@ -372,3 +372,391 @@ pub fn objects_with<'a>(objs: &'a Objects, iface: &str) -> Vec<(String, &'a Prop
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
 }
+
+// ---- live Device1 resolution + connect-error classification ------------------------------------
+
+/// Hex digits of a BD_ADDR, uppercased, no separators. `"aa:bb:…"` / `"AA_BB_…"` → `"AABB…"`.
+pub fn compact_bdaddr(address: &str) -> String {
+    address
+        .bytes()
+        .filter(u8::is_ascii_hexdigit)
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect()
+}
+
+/// Conventional BlueZ device path: `/org/bluez/hci0` + `AA:BB:…` → `/org/bluez/hci0/dev_AA_BB_…`.
+pub fn device_path_for(adapter_path: &str, address: &str) -> String {
+    let compact = compact_bdaddr(address);
+    let mut hex = compact.as_str();
+    let mut parts = Vec::with_capacity(6);
+    while hex.len() >= 2 {
+        parts.push(&hex[..2]);
+        hex = &hex[2..];
+    }
+    format!("{adapter_path}/dev_{}", parts.join("_"))
+}
+
+/// `/org/bluez/hci0/dev_XX_XX_…` → `/org/bluez/hci0`.
+pub fn adapter_from_device_path(device_path: &str) -> Option<&str> {
+    device_path
+        .rsplit_once("/dev_")
+        .map(|(adapter, _)| adapter)
+        .filter(|adapter| !adapter.is_empty())
+}
+
+/// A Device1 object that exists in the current managed-objects snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDevice {
+    pub path: String,
+    pub rssi: Option<i16>,
+}
+
+/// Look up a live Device1 for `address` under `adapter_path`.
+///
+/// Walks Address properties first; if none match, falls back to the conventional
+/// `…/dev_XX_XX_…` path when that object still exists. `None` means BlueZ has
+/// already pruned the temporary object (TemporaryTimeout).
+pub fn resolve_device_from_objects(
+    objs: &Objects,
+    adapter_path: &str,
+    address: &str,
+) -> Option<LiveDevice> {
+    let prefix = format!("{adapter_path}/");
+    let want = compact_bdaddr(address);
+    if want.is_empty() {
+        return None;
+    }
+    for (path, props) in objects_with(objs, IFACE_DEVICE) {
+        if !path.starts_with(&prefix) {
+            continue;
+        }
+        let Some(addr) = prop_str(props, "Address") else {
+            continue;
+        };
+        if compact_bdaddr(&addr) == want {
+            return Some(LiveDevice {
+                path,
+                rssi: prop_i16(props, "RSSI"),
+            });
+        }
+    }
+    let conventional = device_path_for(adapter_path, address);
+    if objs.keys().any(|p| p.as_str() == conventional) {
+        let rssi = iface_props(objs, &conventional, IFACE_DEVICE).and_then(|p| prop_i16(p, "RSSI"));
+        return Some(LiveDevice {
+            path: conventional,
+            rssi,
+        });
+    }
+    None
+}
+
+/// Fetch managed objects and resolve. `None` is a prune, not a bus error.
+pub async fn resolve_device_path(
+    conn: &Connection,
+    adapter_path: &str,
+    address: &str,
+) -> Result<Option<LiveDevice>, PrintError> {
+    let objs = managed_objects(conn).await?;
+    Ok(resolve_device_from_objects(&objs, adapter_path, address))
+}
+
+/// Why a Connect attempt failed. Stable `as_str` prefixes go into journal / `ConnectFailed.last`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectFailureKind {
+    /// TemporaryTimeout / UnknownObject / Device1 gone.
+    Pruned,
+    /// Host aborted the LE link (`le-connection-abort-by-local`, ECONNABORTED).
+    HostAbort,
+    /// Wall-clock or BlueZ timeout.
+    Timeout,
+    /// Adapter powered off / NotReady.
+    AdapterOff,
+    Other,
+}
+
+impl ConnectFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pruned => "pruned",
+            Self::HostAbort => "host-abort",
+            Self::Timeout => "timeout",
+            Self::AdapterOff => "adapter-off",
+            Self::Other => "other",
+        }
+    }
+
+    /// `"{kind}: {detail}"` (or just the kind when detail is empty).
+    pub fn format_last(self, detail: &str) -> String {
+        let d = detail.trim();
+        if d.is_empty() {
+            self.as_str().to_string()
+        } else {
+            format!("{}: {d}", self.as_str())
+        }
+    }
+}
+
+/// Classify a connect-time zbus error via its D-Bus name and message.
+pub fn classify_connect_error(e: &zbus::Error) -> ConnectFailureKind {
+    if is_gone(e) {
+        return ConnectFailureKind::Pruned;
+    }
+    classify_connect_name_message(err_name(e).as_deref(), &err_message(e))
+}
+
+/// Classify from representative BlueZ error names + messages. Wall-clock timeouts
+/// never produce a zbus error — callers map those to [`ConnectFailureKind::Timeout`]
+/// directly.
+pub fn classify_connect_name_message(name: Option<&str>, message: &str) -> ConnectFailureKind {
+    let name = name.unwrap_or("");
+    let msg = message.to_ascii_lowercase();
+
+    if matches!(
+        name,
+        "org.freedesktop.DBus.Error.UnknownObject" | "org.bluez.Error.NotConnected"
+    ) || msg.contains("doesn't exist")
+        || msg.contains("unknown object")
+        || (name == "org.bluez.Error.Failed"
+            && (msg.contains("not connected") || msg.contains("disconnected")))
+    {
+        return ConnectFailureKind::Pruned;
+    }
+
+    if name == "org.bluez.Error.NotReady" {
+        return ConnectFailureKind::AdapterOff;
+    }
+
+    if msg.contains("le-connection-abort-by-local")
+        || msg.contains("connection aborted")
+        || msg.contains("econnaborted")
+    {
+        return ConnectFailureKind::HostAbort;
+    }
+
+    if name == "org.bluez.Error.Timeout"
+        || name == "org.freedesktop.DBus.Error.NoReply"
+        || ((name == "org.bluez.Error.Failed" || name.is_empty())
+            && (msg.contains("timed out") || msg.contains("timeout")))
+    {
+        return ConnectFailureKind::Timeout;
+    }
+
+    ConnectFailureKind::Other
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+
+    fn ov(v: Value<'static>) -> OwnedValue {
+        OwnedValue::try_from(v).unwrap()
+    }
+
+    fn insert_iface(
+        objs: &mut Objects,
+        path: &str,
+        iface: &str,
+        props: Vec<(&str, Value<'static>)>,
+    ) {
+        let mut map = HashMap::new();
+        for (k, v) in props {
+            map.insert(k.to_string(), ov(v));
+        }
+        let mut ifaces = objs
+            .remove(&OwnedObjectPath::try_from(path).unwrap())
+            .unwrap_or_default();
+        ifaces.insert(
+            zbus::names::OwnedInterfaceName::try_from(iface).unwrap(),
+            map,
+        );
+        objs.insert(OwnedObjectPath::try_from(path).unwrap(), ifaces);
+    }
+
+    fn insert_empty(objs: &mut Objects, path: &str) {
+        objs.insert(OwnedObjectPath::try_from(path).unwrap(), HashMap::new());
+    }
+
+    #[test]
+    fn compact_and_conventional_path() {
+        assert_eq!(compact_bdaddr("aa:bb:cc:dd:ee:ff"), "AABBCCDDEEFF");
+        assert_eq!(compact_bdaddr("AA_BB_CC_DD_EE_FF"), "AABBCCDDEEFF");
+        assert_eq!(
+            device_path_for("/org/bluez/hci0", "48:0f:57:17:06:9d"),
+            "/org/bluez/hci0/dev_48_0F_57_17_06_9D"
+        );
+        assert_eq!(
+            device_path_for("/org/bluez/hci1", "48_0F_57_17_06_9D"),
+            "/org/bluez/hci1/dev_48_0F_57_17_06_9D"
+        );
+        assert_eq!(
+            adapter_from_device_path("/org/bluez/hci0/dev_48_0F_57_17_06_9D"),
+            Some("/org/bluez/hci0")
+        );
+        assert_eq!(adapter_from_device_path("/org/bluez/hci0"), None);
+        assert_eq!(adapter_from_device_path("/dev_AA"), None);
+    }
+
+    #[test]
+    fn resolve_live_path_from_address() {
+        let mut objs: Objects = Default::default();
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0/dev_48_0F_57_17_06_9D",
+            IFACE_DEVICE,
+            vec![
+                ("Address", Value::from("48:0F:57:17:06:9D")),
+                ("RSSI", Value::from(-52i16)),
+            ],
+        );
+        let live = resolve_device_from_objects(&objs, "/org/bluez/hci0", "48:0f:57:17:06:9d")
+            .expect("live");
+        assert_eq!(live.path, "/org/bluez/hci0/dev_48_0F_57_17_06_9D");
+        assert_eq!(live.rssi, Some(-52));
+    }
+
+    #[test]
+    fn resolve_prefers_address_match_over_conventional_name() {
+        let mut objs: Objects = Default::default();
+        // Same BD_ADDR living under a non-conventional path.
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0/dev_TMP_1",
+            IFACE_DEVICE,
+            vec![
+                ("Address", Value::from("AA:BB:CC:DD:EE:FF")),
+                ("RSSI", Value::from(-40i16)),
+            ],
+        );
+        insert_empty(&mut objs, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF");
+        let live =
+            resolve_device_from_objects(&objs, "/org/bluez/hci0", "AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(live.path, "/org/bluez/hci0/dev_TMP_1");
+        assert_eq!(live.rssi, Some(-40));
+    }
+
+    #[test]
+    fn resolve_conventional_fallback_when_object_exists() {
+        let mut objs: Objects = Default::default();
+        // Object exists at the conventional path but has no Address property — walk misses it.
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+            IFACE_DEVICE,
+            vec![("RSSI", Value::from(-61i16))],
+        );
+        let live =
+            resolve_device_from_objects(&objs, "/org/bluez/hci0", "aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(live.path, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF");
+        assert_eq!(live.rssi, Some(-61));
+    }
+
+    #[test]
+    fn resolve_none_when_pruned() {
+        let objs: Objects = Default::default();
+        assert!(
+            resolve_device_from_objects(&objs, "/org/bluez/hci0", "AA:BB:CC:DD:EE:FF").is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_cross_adapters() {
+        let mut objs: Objects = Default::default();
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+            IFACE_DEVICE,
+            vec![("Address", Value::from("AA:BB:CC:DD:EE:FF"))],
+        );
+        assert!(
+            resolve_device_from_objects(&objs, "/org/bluez/hci0", "AA:BB:CC:DD:EE:FF").is_none()
+        );
+    }
+
+    fn method_err(name: &str, msg: &str) -> zbus::Error {
+        let call = zbus::Message::method_call("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", "Connect")
+            .expect("builder")
+            .build(&())
+            .expect("message");
+        let ename = zbus::names::ErrorName::try_from(name).expect("error name");
+        zbus::Error::MethodError(ename.into(), Some(msg.to_string()), call)
+    }
+
+    #[test]
+    fn classify_prune_host_abort_timeout_adapter_off_other() {
+        let unknown = zbus::Error::FDO(Box::new(zbus::fdo::Error::UnknownObject(
+            "Method \"Connect\" with signature \"\" on interface \"org.bluez.Device1\" doesn't exist"
+                .into(),
+        )));
+        assert_eq!(classify_connect_error(&unknown), ConnectFailureKind::Pruned);
+        assert_eq!(
+            classify_connect_name_message(
+                Some("org.freedesktop.DBus.Error.UnknownObject"),
+                "Method \"Connect\" … doesn't exist"
+            ),
+            ConnectFailureKind::Pruned
+        );
+        assert_eq!(
+            classify_connect_name_message(
+                Some("org.freedesktop.DBus.Error.UnknownMethod"),
+                "Method \"Connect\" with signature \"\" on interface \"org.bluez.Device1\" doesn't exist"
+            ),
+            ConnectFailureKind::Pruned
+        );
+
+        let abort = method_err(
+            "org.bluez.Error.Failed",
+            "br-connection-canceled, le-connection-abort-by-local",
+        );
+        assert_eq!(
+            classify_connect_error(&abort),
+            ConnectFailureKind::HostAbort
+        );
+        assert_eq!(
+            classify_connect_name_message(Some("org.bluez.Error.Failed"), "connection aborted"),
+            ConnectFailureKind::HostAbort
+        );
+        assert_eq!(
+            classify_connect_name_message(None, "ECONNABORTED"),
+            ConnectFailureKind::HostAbort
+        );
+
+        let timed = method_err("org.bluez.Error.Failed", "Operation timed out");
+        assert_eq!(classify_connect_error(&timed), ConnectFailureKind::Timeout);
+        assert_eq!(
+            classify_connect_name_message(Some("org.bluez.Error.Failed"), "timed out"),
+            ConnectFailureKind::Timeout
+        );
+        assert_eq!(
+            classify_connect_name_message(Some("org.bluez.Error.Timeout"), "gave up"),
+            ConnectFailureKind::Timeout
+        );
+
+        let off = method_err("org.bluez.Error.NotReady", "Resource Not Ready");
+        assert_eq!(classify_connect_error(&off), ConnectFailureKind::AdapterOff);
+        assert_eq!(
+            classify_connect_name_message(Some("org.bluez.Error.NotReady"), ""),
+            ConnectFailureKind::AdapterOff
+        );
+
+        let other = method_err(
+            "org.bluez.Error.Failed",
+            "br-connection-profile-unavailable",
+        );
+        assert_eq!(classify_connect_error(&other), ConnectFailureKind::Other);
+
+        assert_eq!(
+            ConnectFailureKind::Pruned.format_last("device object gone"),
+            "pruned: device object gone"
+        );
+        assert_eq!(
+            ConnectFailureKind::HostAbort.format_last("le-connection-abort-by-local"),
+            "host-abort: le-connection-abort-by-local"
+        );
+        assert_eq!(
+            ConnectFailureKind::Timeout.format_last("timed out"),
+            "timeout: timed out"
+        );
+    }
+}
