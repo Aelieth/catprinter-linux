@@ -30,6 +30,8 @@ pub trait Adapter1 {
     #[zbus(property)]
     fn powered(&self) -> zbus::Result<bool>;
     #[zbus(property)]
+    fn set_powered(&self, value: bool) -> zbus::Result<()>;
+    #[zbus(property)]
     fn discovering(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn address(&self) -> zbus::Result<String>;
@@ -451,6 +453,65 @@ pub fn resolve_device_from_objects(
     None
 }
 
+/// Live Adapter1 state from a managed-objects snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterHealth {
+    Powered,
+    Unpowered,
+    Missing,
+}
+
+pub fn adapter_health_from_objects(objs: &Objects, adapter_path: &str) -> AdapterHealth {
+    match iface_props(objs, adapter_path, IFACE_ADAPTER) {
+        None => AdapterHealth::Missing,
+        Some(p) if prop_bool(p, "Powered").unwrap_or(false) => AdapterHealth::Powered,
+        Some(_) => AdapterHealth::Unpowered,
+    }
+}
+
+/// Wait for the adapter object to exist and be Powered. Unpowered → `Set Powered true`
+/// (D-Bus, not a config write). Missing → USB reset / firmware reload in progress.
+/// Returns whether the adapter is usable when the wait ends.
+pub async fn recover_adapter(conn: &Connection, adapter_path: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut asked_power = false;
+    loop {
+        match managed_objects(conn).await {
+            Ok(objs) => match adapter_health_from_objects(&objs, adapter_path) {
+                AdapterHealth::Powered => return true,
+                AdapterHealth::Unpowered if !asked_power => {
+                    asked_power = true;
+                    if let Ok(ad) = adapter_proxy(conn, adapter_path).await {
+                        match tokio::time::timeout(CALL_TIMEOUT, ad.set_powered(true)).await {
+                            Ok(Ok(())) => tracing::info!(
+                                path = %adapter_path,
+                                "adapter was off; Set Powered true"
+                            ),
+                            Ok(Err(e)) => tracing::debug!(
+                                "Set Powered on {adapter_path}: {}",
+                                err_message(&e)
+                            ),
+                            Err(_) => tracing::debug!("Set Powered on {adapter_path} timed out"),
+                        }
+                    }
+                }
+                AdapterHealth::Missing => {
+                    tracing::warn!(
+                        path = %adapter_path,
+                        "adapter object gone (USB reset / firmware reload?); waiting"
+                    );
+                }
+                AdapterHealth::Unpowered => {}
+            },
+            Err(e) => tracing::debug!("recover_adapter list objects: {e}"),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// Fetch managed objects and resolve. `None` is a prune, not a bus error.
 pub async fn resolve_device_path(
     conn: &Connection,
@@ -523,14 +584,20 @@ pub fn classify_connect_name_message(name: Option<&str>, message: &str) -> Conne
         return ConnectFailureKind::Pruned;
     }
 
-    if name == "org.bluez.Error.NotReady" {
+    // BlueZ device.c: EHOSTUNREACH = adapter not powered, ECONNABORTED = adapter
+    // powered down. Distinct from HCI_ERROR_LOCAL_HOST_TERM (host-abort).
+    if name == "org.bluez.Error.NotReady"
+        || msg.contains("adapter not powered")
+        || msg.contains("ehostunreach")
+        || msg.contains("resource not ready")
+        || msg.contains("no such device")
+        || msg.contains("hci down")
+        || (msg.contains("econnaborted") && !msg.contains("le-connection-abort-by-local"))
+    {
         return ConnectFailureKind::AdapterOff;
     }
 
-    if msg.contains("le-connection-abort-by-local")
-        || msg.contains("connection aborted")
-        || msg.contains("econnaborted")
-    {
+    if msg.contains("le-connection-abort-by-local") || msg.contains("connection aborted") {
         return ConnectFailureKind::HostAbort;
     }
 
@@ -719,7 +786,14 @@ mod tests {
         );
         assert_eq!(
             classify_connect_name_message(None, "ECONNABORTED"),
-            ConnectFailureKind::HostAbort
+            ConnectFailureKind::AdapterOff
+        );
+        assert_eq!(
+            classify_connect_name_message(
+                Some("org.bluez.Error.Failed"),
+                "br-connection-canceled, Adapter not powered"
+            ),
+            ConnectFailureKind::AdapterOff
         );
 
         let timed = method_err("org.bluez.Error.Failed", "Operation timed out");
@@ -757,6 +831,35 @@ mod tests {
         assert_eq!(
             ConnectFailureKind::Timeout.format_last("timed out"),
             "timeout: timed out"
+        );
+    }
+
+    #[test]
+    fn adapter_health_powered_unpowered_missing() {
+        let mut objs: Objects = Default::default();
+        assert_eq!(
+            adapter_health_from_objects(&objs, "/org/bluez/hci0"),
+            AdapterHealth::Missing
+        );
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0",
+            IFACE_ADAPTER,
+            vec![("Powered", Value::from(false))],
+        );
+        assert_eq!(
+            adapter_health_from_objects(&objs, "/org/bluez/hci0"),
+            AdapterHealth::Unpowered
+        );
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0",
+            IFACE_ADAPTER,
+            vec![("Powered", Value::from(true))],
+        );
+        assert_eq!(
+            adapter_health_from_objects(&objs, "/org/bluez/hci0"),
+            AdapterHealth::Powered
         );
     }
 }

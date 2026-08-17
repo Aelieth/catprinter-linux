@@ -22,6 +22,7 @@ const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(1200);
 const HOST_ABORT_PAUSE: Duration = Duration::from_millis(2500);
 const PRUNE_PAUSE: Duration = Duration::from_millis(800);
+const ADAPTER_OFF_PAUSE: Duration = Duration::from_millis(3500);
 const POST_DISCONNECT_SLEEP: Duration = Duration::from_millis(800);
 /// Cheap toys drop notifications if the buffer is tiny; 256 is plenty for our command traffic.
 const NOTIFY_CHANNEL: usize = 256;
@@ -128,11 +129,15 @@ impl Session {
                         match connect_next_action(kind, attempt, attempts) {
                             ConnectNext::Retry {
                                 pause,
-                                refresh_discovery,
+                                ensure_discovery,
+                                recover_adapter,
                             } => {
                                 tokio::time::sleep(pause).await;
-                                if refresh_discovery {
-                                    discovery::refresh_le_discovery(conn, &adapter_path).await;
+                                if recover_adapter {
+                                    let _ = bluez::recover_adapter(conn, &adapter_path).await;
+                                }
+                                if ensure_discovery {
+                                    discovery::ensure_le_discovery(conn, &adapter_path).await;
                                 }
                                 continue;
                             }
@@ -186,8 +191,12 @@ impl Session {
                         one.kind,
                         &one.detail,
                     );
-                    // Release the proxy and any in-flight link *before* the pause so
-                    // autosuspend/coex aborts can actually settle.
+                    // Do not Disconnect again: host-abort already tore the HCI link
+                    // (HCI_ERROR_LOCAL_HOST_TERM); a second Disconnect / StopDiscovery
+                    // is what btusb_rtl_reset / btusb_qca_reset treat as cmd-timeout
+                    // and USB-resets — adapter goes offline. Timeout already cancelled
+                    // once inside try_one_connect.
+                    guard.armed = false;
                     drop(dev);
                     drop(guard);
                     match connect_next_action(one.kind, attempt, attempts) {
@@ -195,11 +204,15 @@ impl Session {
                         ConnectNext::GiveUp => {}
                         ConnectNext::Retry {
                             pause,
-                            refresh_discovery,
+                            ensure_discovery,
+                            recover_adapter,
                         } => {
                             tokio::time::sleep(pause).await;
-                            if refresh_discovery {
-                                discovery::refresh_le_discovery(conn, &adapter_path).await;
+                            if recover_adapter {
+                                let _ = bluez::recover_adapter(conn, &adapter_path).await;
+                            }
+                            if ensure_discovery {
+                                discovery::ensure_le_discovery(conn, &adapter_path).await;
                             }
                         }
                     }
@@ -429,8 +442,10 @@ impl Drop for ConnectGuard {
 }
 
 /// Inter-attempt pause: host-abort (autosuspend/coex) waits longer; prune is short + re-resolve.
+/// Adapter-off waits longest so USB reset / firmware reload can finish.
 pub(crate) fn pause_after_failure(kind: ConnectFailureKind) -> Duration {
     match kind {
+        ConnectFailureKind::AdapterOff => ADAPTER_OFF_PAUSE,
         ConnectFailureKind::HostAbort => HOST_ABORT_PAUSE,
         ConnectFailureKind::Pruned => PRUNE_PAUSE,
         _ => CONNECT_RETRY_PAUSE,
@@ -441,20 +456,28 @@ pub(crate) fn pause_after_failure(kind: ConnectFailureKind) -> Duration {
 pub(crate) enum ConnectNext {
     Retry {
         pause: Duration,
-        refresh_discovery: bool,
+        /// StartDiscovery if it died — never StopDiscovery between attempts.
+        ensure_discovery: bool,
+        /// Set Powered / wait for USB re-enumeration.
+        recover_adapter: bool,
     },
     GiveUp,
     FailAdapterOff,
 }
 
-/// What to do after a classified connect failure. AdapterOff is terminal; prune/host-abort
-/// refresh LE discovery so BlueZ can recreate a temporary Device1.
+/// What to do after a classified connect failure.
+///
+/// AdapterOff used to be immediately terminal. Combo-card USB reset (btusb_reset
+/// after a hung Connect) drops Adapter1.Powered for a few seconds; giving up
+/// then leaves the job with "Bluetooth is turned off" while the radio is only
+/// reloading firmware. Recover and retry inside the attempt budget; only the
+/// last attempt stays terminal.
 pub(crate) fn connect_next_action(
     kind: ConnectFailureKind,
     attempt: u8,
     attempts: u8,
 ) -> ConnectNext {
-    if kind == ConnectFailureKind::AdapterOff {
+    if kind == ConnectFailureKind::AdapterOff && attempt >= attempts {
         return ConnectNext::FailAdapterOff;
     }
     if attempt >= attempts {
@@ -462,10 +485,11 @@ pub(crate) fn connect_next_action(
     }
     ConnectNext::Retry {
         pause: pause_after_failure(kind),
-        refresh_discovery: matches!(
+        ensure_discovery: matches!(
             kind,
             ConnectFailureKind::Pruned | ConnectFailureKind::HostAbort
         ),
+        recover_adapter: kind == ConnectFailureKind::AdapterOff,
     }
 }
 
@@ -898,13 +922,25 @@ mod tests {
         assert_eq!(other, CONNECT_RETRY_PAUSE);
         assert_eq!(prune, PRUNE_PAUSE);
         assert_eq!(abort, HOST_ABORT_PAUSE);
+        assert!(
+            pause_after_failure(ConnectFailureKind::AdapterOff) > abort,
+            "USB-reset recovery must wait longer than a host-abort"
+        );
     }
 
     #[test]
     fn connect_next_action_by_kind() {
         assert_eq!(
-            connect_next_action(ConnectFailureKind::AdapterOff, 1, 3),
+            connect_next_action(ConnectFailureKind::AdapterOff, 3, 3),
             ConnectNext::FailAdapterOff
+        );
+        assert_eq!(
+            connect_next_action(ConnectFailureKind::AdapterOff, 1, 3),
+            ConnectNext::Retry {
+                pause: ADAPTER_OFF_PAUSE,
+                ensure_discovery: false,
+                recover_adapter: true,
+            }
         );
         assert_eq!(
             connect_next_action(ConnectFailureKind::Timeout, 3, 3),
@@ -914,29 +950,48 @@ mod tests {
             connect_next_action(ConnectFailureKind::Timeout, 1, 3),
             ConnectNext::Retry {
                 pause: CONNECT_RETRY_PAUSE,
-                refresh_discovery: false,
+                ensure_discovery: false,
+                recover_adapter: false,
             }
         );
         assert_eq!(
             connect_next_action(ConnectFailureKind::Pruned, 1, 3),
             ConnectNext::Retry {
                 pause: PRUNE_PAUSE,
-                refresh_discovery: true,
+                ensure_discovery: true,
+                recover_adapter: false,
             }
         );
         assert_eq!(
             connect_next_action(ConnectFailureKind::HostAbort, 2, 3),
             ConnectNext::Retry {
                 pause: HOST_ABORT_PAUSE,
-                refresh_discovery: true,
+                ensure_discovery: true,
+                recover_adapter: false,
             }
         );
         assert_eq!(
             connect_next_action(ConnectFailureKind::Other, 2, 3),
             ConnectNext::Retry {
                 pause: CONNECT_RETRY_PAUSE,
-                refresh_discovery: false,
+                ensure_discovery: false,
+                recover_adapter: false,
             }
         );
+    }
+
+    #[test]
+    fn retry_refresh_path_does_not_stop_discovery() {
+        let src = include_str!("discovery.rs");
+        let start = src
+            .find("pub async fn ensure_le_discovery")
+            .expect("ensure_le_discovery");
+        let end = src.find("pub async fn scan").expect("scan");
+        let block = &src[start..end];
+        assert!(
+            !block.contains("stop_scan"),
+            "ensure/refresh must not StopDiscovery (combo USB reset): {block}"
+        );
+        assert!(block.contains("start_le_discovery") || block.contains("ensure_le_discovery"));
     }
 }

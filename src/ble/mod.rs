@@ -117,7 +117,25 @@ impl BlePrinter {
     ) -> Result<Session, PrintError> {
         let hint = self.hint();
         let objs = bluez::managed_objects(conn).await?;
-        let adapter = discovery::choose_adapter(&objs, self.adapter.as_deref())?;
+        let adapter = match discovery::choose_adapter(&objs, self.adapter.as_deref()) {
+            Ok(a) => a,
+            Err(PrintError::AdapterOff) => {
+                // Combo USB reset / rfkill leftover: Adapter1 exists but Powered=false,
+                // or the object is mid-re-enumerate. Try Set Powered, then re-choose.
+                let path = discovery::adapters_from(&objs)
+                    .into_iter()
+                    .next()
+                    .map(|a| a.path)
+                    .unwrap_or_else(|| "/org/bluez/hci0".into());
+                if bluez::recover_adapter(conn, &path).await {
+                    let objs = bluez::managed_objects(conn).await?;
+                    discovery::choose_adapter(&objs, self.adapter.as_deref())?
+                } else {
+                    return Err(PrintError::AdapterOff);
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         progress(Progress {
             phase: Phase::Searching,

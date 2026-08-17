@@ -19,6 +19,75 @@ const DEVICE_MISC_IAD: &str = "ef";
 pub struct BtUsbInterface {
     pub name: String,
     pub power_control: Option<String>,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub driver: Option<String>,
+}
+
+/// USB Bluetooth firmware family from btusb.c id tables + bound driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipFamily {
+    Mediatek,
+    Realtek,
+    Qualcomm,
+    Intel,
+    Generic,
+    None,
+}
+
+impl ChipFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mediatek => "mediatek",
+            Self::Realtek => "realtek",
+            Self::Qualcomm => "qca",
+            Self::Intel => "intel",
+            Self::Generic => "generic",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Classify from sysfs `idVendor`/`idProduct` (hex) and the interface's bound driver.
+/// Driver name wins (btmtk / btrtl / btintel / btqca). Vendor 0489 is Foxconn OEM
+/// for both MediaTek and Qualcomm — those use the btusb quirk table, not vendor alone.
+pub fn chip_family_from_ids(vendor: &str, product: &str, driver: Option<&str>) -> ChipFamily {
+    let drv = driver.unwrap_or("").to_ascii_lowercase();
+    if drv.contains("btmtk") {
+        return ChipFamily::Mediatek;
+    }
+    if drv.contains("btrtl") {
+        return ChipFamily::Realtek;
+    }
+    if drv.contains("btintel") {
+        return ChipFamily::Intel;
+    }
+    if drv.contains("btqca") || drv.contains("ath3k") || drv.contains("hci_qca") {
+        return ChipFamily::Qualcomm;
+    }
+    let vid = u16::from_str_radix(vendor.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+    let pid = u16::from_str_radix(product.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+    match vid {
+        0x0bda => ChipFamily::Realtek,
+        0x0e8d => ChipFamily::Mediatek,
+        0x8087 => ChipFamily::Intel,
+        0x0cf3 => ChipFamily::Qualcomm,
+        0x0489 => foxconn_family(pid),
+        _ if vid != 0 => ChipFamily::Generic,
+        _ => ChipFamily::None,
+    }
+}
+
+/// Foxconn 0489:e14e is MT7925 (btusb BTUSB_MEDIATEK); 0489:e0e3 is WCN6855 (QCA).
+fn foxconn_family(pid: u16) -> ChipFamily {
+    match pid {
+        0xe0c7 | 0xe0c9 | 0xe0ca | 0xe0cb | 0xe0cc | 0xe0ce | 0xe0d0 | 0xe0d6 | 0xe0de | 0xe0df
+        | 0xe0e1 | 0xe0e3 | 0xe0ea | 0xe0ec | 0xe0fc | 0xe0f3 | 0xe100 => ChipFamily::Qualcomm,
+        0xe0c8 | 0xe0cd | 0xe0e0 | 0xe0f2 | 0xe0d8 | 0xe0d9 | 0xe0e2 | 0xe0e4 | 0xe0f1 | 0xe0f5
+        | 0xe0f6 | 0xe102 | 0xe111 | 0xe113 | 0xe118 | 0xe11e | 0xe124 | 0xe134 | 0xe135
+        | 0xe14e | 0xe14f | 0xe150 | 0xe151 => ChipFamily::Mediatek,
+        _ => ChipFamily::Generic,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +96,7 @@ pub struct HostFacts {
     /// True when the value is BlueZ's default (key absent, commented, or unreadable).
     pub temporary_timeout_is_default: bool,
     pub combo: bool,
+    pub chip: ChipFamily,
     pub bt_interfaces: Vec<BtUsbInterface>,
 }
 
@@ -63,10 +133,11 @@ impl HostFacts {
     }
 
     /// Labels + values printed by `catprinterd check` (does not affect READY).
-    pub fn check_lines(&self) -> [(&'static str, String); 3] {
+    pub fn check_lines(&self) -> [(&'static str, String); 4] {
         [
             ("TemporaryTimeout", self.temporary_timeout_line()),
             ("combo", self.combo_line().to_string()),
+            ("bt chip", self.chip.as_str().to_string()),
             ("power/control", self.power_control_line()),
         ]
     }
@@ -163,22 +234,62 @@ pub fn usb_bt_facts(usb_devices: &Path) -> (bool, Vec<BtUsbInterface>) {
                 combo = true;
             }
         }
+        let (vendor, product, driver) = if let Some(par) = parent {
+            let parent_dir = usb_devices.join(par);
+            (
+                read_trim(&parent_dir.join("idVendor")),
+                read_trim(&parent_dir.join("idProduct")),
+                read_driver_name(&p.join("driver")),
+            )
+        } else {
+            (None, None, read_driver_name(&p.join("driver")))
+        };
         ifaces.push(BtUsbInterface {
             name: name.into_owned(),
             power_control: power,
+            vendor,
+            product,
+            driver,
         });
     }
     ifaces.sort_by(|a, b| a.name.cmp(&b.name));
     (combo, ifaces)
 }
 
+fn read_driver_name(link: &Path) -> Option<String> {
+    fs::read_link(link)
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .or_else(|| read_trim(link))
+}
+
+fn chip_from_ifaces(ifaces: &[BtUsbInterface]) -> ChipFamily {
+    ifaces
+        .iter()
+        .map(|i| {
+            chip_family_from_ids(
+                i.vendor.as_deref().unwrap_or(""),
+                i.product.as_deref().unwrap_or(""),
+                i.driver.as_deref(),
+            )
+        })
+        .find(|f| !matches!(f, ChipFamily::None | ChipFamily::Generic))
+        .unwrap_or(if ifaces.is_empty() {
+            ChipFamily::None
+        } else {
+            ChipFamily::Generic
+        })
+}
+
 pub fn collect_host_facts(usb_devices: &Path, main_conf: &Path) -> HostFacts {
     let (temporary_timeout, temporary_timeout_is_default) = temporary_timeout_from_path(main_conf);
     let (combo, bt_interfaces) = usb_bt_facts(usb_devices);
+    let chip = chip_from_ifaces(&bt_interfaces);
     HostFacts {
         temporary_timeout,
         temporary_timeout_is_default,
         combo,
+        chip,
         bt_interfaces,
     }
 }
@@ -276,7 +387,8 @@ mod tests {
         let lines = facts.check_lines();
         assert_eq!(lines[0], ("TemporaryTimeout", "0".into()));
         assert_eq!(lines[1], ("combo", "yes".into()));
-        assert!(lines[2].1.contains("3-4:1.0=on"));
+        assert_eq!(lines[2].0, "bt chip");
+        assert!(lines[3].1.contains("3-4:1.0=on"));
     }
 
     #[test]
@@ -311,7 +423,37 @@ mod tests {
         assert!(facts.bt_interfaces.is_empty());
         assert_eq!(facts.power_control_line(), "no BT USB interfaces");
         let lines = facts.check_lines();
-        assert_eq!(lines[2], ("power/control", "no BT USB interfaces".into()));
+        assert_eq!(lines[2], ("bt chip", "none".into()));
+        assert_eq!(lines[3], ("power/control", "no BT USB interfaces".into()));
+    }
+
+    #[test]
+    fn chip_family_from_btusb_id_tables() {
+        // kids-pc RTL8822CE USB BT (btusb BTUSB_REALTEK)
+        assert_eq!(
+            chip_family_from_ids("0bda", "b00c", None),
+            ChipFamily::Realtek
+        );
+        // blue-lt MT7925 Foxconn (btusb BTUSB_MEDIATEK)
+        assert_eq!(
+            chip_family_from_ids("0489", "e14e", None),
+            ChipFamily::Mediatek
+        );
+        // QCA WCN6855 Foxconn (btusb BTUSB_QCA_WCN6855) — same OEM as MTK
+        assert_eq!(
+            chip_family_from_ids("0489", "e0e3", None),
+            ChipFamily::Qualcomm
+        );
+        // Driver name wins over a misleading vendor.
+        assert_eq!(
+            chip_family_from_ids("0489", "e0e3", Some("btmtk")),
+            ChipFamily::Mediatek
+        );
+        assert_eq!(
+            chip_family_from_ids("8087", "0033", Some("btintel")),
+            ChipFamily::Intel
+        );
+        assert_eq!(chip_family_from_ids("", "", None), ChipFamily::None);
     }
 
     #[test]

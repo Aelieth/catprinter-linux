@@ -221,17 +221,24 @@ pub async fn start_le_discovery(conn: &Connection, adapter_path: &str) -> Result
     }
 }
 
-/// Restart LE discovery so BlueZ can recreate a TemporaryTimeout-pruned Device1.
-/// Discovery is running again before this returns (scan-while-connecting stays the rule).
-pub async fn refresh_le_discovery(conn: &Connection, adapter_path: &str) {
-    stop_scan(conn, adapter_path).await;
-    // Tiny gap so BlueZ drops the old session; do not linger — the next Connect wants scan on.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    if let Err(e) = start_le_discovery(conn, adapter_path).await {
-        tracing::debug!("LE discovery refresh: {e}");
-        let _ = start_le_discovery(conn, adapter_path).await;
+/// Make sure LE discovery is running. Never StopDiscovery: on combo USB
+/// controllers (btusb + Realtek/QCA/MediaTek) stop+start during a failed
+/// Connect races firmware reload and takes the adapter offline.
+pub async fn ensure_le_discovery(conn: &Connection, adapter_path: &str) {
+    if let Ok(ad) = bluez::adapter_proxy(conn, adapter_path).await {
+        if let Ok(Ok(true)) = tokio::time::timeout(bluez::CALL_TIMEOUT, ad.discovering()).await {
+            return;
+        }
     }
-    // Advertisements recreate temporary objects within a few hundred ms.
+    if let Err(e) = start_le_discovery(conn, adapter_path).await {
+        tracing::debug!("ensure LE discovery: {e}");
+    }
+}
+
+/// After TemporaryTimeout prune: keep the existing scan (do not stop it) and
+/// give advertisements a beat to recreate the Device1 object.
+pub async fn refresh_le_discovery(conn: &Connection, adapter_path: &str) {
+    ensure_le_discovery(conn, adapter_path).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
 }
 

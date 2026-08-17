@@ -75,7 +75,7 @@ Never make CatPrinter the *default* printer (homework on 48 mm tape); `install.s
 | two "Cat Printer" entries in the dialog | the daemon adopts the CUPS queue's uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
 
 `catprinterd check` (Bluetooth adapter / bluetoothd / port, plus read-only host facts:
-TemporaryTimeout, combo-card heuristic, USB BT `power/control`) and `catprinterd status`
+TemporaryTimeout, combo-card heuristic, `bt chip`, USB BT `power/control`) and `catprinterd status`
 (connects to the printer, reports model, battery, paper) are handy on the console.
 
 ## Developing
@@ -114,7 +114,8 @@ cargo run -- print file.png --preview-only out.png # render only
   every Connect re-resolves a live path by address instead of reusing the discovery-time
   object. Combo Wi-Fi/BT cards also abort pending connects (`le-connection-abort-by-local`);
   the daemon classifies prune / host-abort / timeout / adapter-off, waits longer after a
-  host abort, and refreshes LE discovery after prune or abort. It still retries 3 attempts
+  host abort, keeps LE scan running (StopDiscovery mid-retry USB-resets combo firmware),
+  and if the adapter drops Powered it issues Set Powered and waits for re-enumeration. It still retries 3 attempts
   per round (12 s each) until `CATPRINTER_PRINTER_WAIT`. Strips longer than 4000 lines
   (multi-request segments) and the "Bluetooth Settings holds the link" path are implemented but
   were not exercised on hardware. Machines with more than one Bluetooth adapter: the daemon uses

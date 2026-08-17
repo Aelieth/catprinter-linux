@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.3 — 2026-08-17
+
+Production: combo-card USB firmware (btusb Realtek/QCA/MediaTek) was going
+offline under 0.2.2 retries. Kernel `btusb_rtl_reset` / `btusb_qca_reset` /
+`btusb_reset` USB-reset the controller on command timeout; BlueZ
+`device_request_disconnect` already has a 2 s timer. Stopping discovery and
+Disconnecting again after `le-connection-abort-by-local` raced that reset.
+
+- Never `StopDiscovery` between Connect attempts (`ensure_le_discovery` only
+  starts if Discovering is already false).
+- Do not Disconnect again after a failed Connect (host-abort already tore the
+  HCI link; timeout cancels once).
+- Treat `ECONNABORTED` / “adapter not powered” as adapter-off, not host-abort.
+- Adapter-off is no longer immediately terminal: wait, `Set Powered true`,
+  wait for USB re-enumeration, then retry inside the 3-attempt budget.
+- `open()` recovers a Powered=false adapter before giving up.
+- `catprinterd check` prints `bt chip` from btusb id tables (mediatek /
+  realtek / qca / intel).
+
 ## 0.2.2 — 2026-08-16
 
 BlueZ connect no longer trusts a discovery-time Device1 path. Unpaired printers
