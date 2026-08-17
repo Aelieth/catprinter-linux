@@ -9,7 +9,7 @@ ARCH    := x86_64
 KIT     := dist/catprinter-kit
 TARBALL := dist/catprinter-kit-$(VERSION)-$(ARCH).tar.gz
 KIT_FILES := packaging/install.sh packaging/catprinter.service packaging/catprinter-queue.service \
-             packaging/env.example packaging/80-catprinter.preset
+             packaging/env.example packaging/80-catprinter.preset packaging/61-catprinter-btusb.rules
 DEST ?= dist/image-root
 FIXTURE := tests/fixtures/text-roll48.pwg
 IPPTOOL_TESTS := /usr/share/cups/ipptool
@@ -25,7 +25,7 @@ help:
 	  'check        fmt --check, clippy -D warnings, tests, shell lint (install.sh, fleet-test.sh), unit verify' \
 	  'test         cargo test --locked' \
 	  'kit          dist/catprinter-kit/ + $(TARBALL) + dist/SHA256SUMS' \
-	  'image-files  DEST=dir  files for an image build: /usr/bin, /usr/lib/systemd/system (+wants symlinks), preset, /usr/lib/catprinter' \
+	  'image-files  DEST=dir  files for an image build: /usr/bin, /usr/lib/systemd/system (+wants symlinks), preset, udev, /usr/lib/catprinter' \
 	  'fleet-test   boot the kit and the image files in systemd containers (PODMAN="$(FLEET_PODMAN)"; KEEP=1, FLEET_FIRST_BOOT=1)' \
 	  'ipptool      run the IPP Everywhere suite against a fake-printer daemon (needs ipptool)' \
 	  'fixtures     regenerate tests/fixtures/*.pwg with the host CUPS filters' \
@@ -92,6 +92,8 @@ image-files: build
 	  ln -sfn /usr/lib/systemd/system/$$u $(DEST)/etc/systemd/system/multi-user.target.wants/$$u; \
 	done
 	install -D -m 0644 packaging/80-catprinter.preset $(DEST)/usr/lib/systemd/system-preset/80-catprinter.preset
+	install -D -m 0644 packaging/61-catprinter-btusb.rules $(DEST)/usr/lib/udev/rules.d/61-catprinter-btusb.rules
+	install -D -m 0644 packaging/61-catprinter-btusb.rules $(DEST)/usr/lib/catprinter/61-catprinter-btusb.rules
 	install -D -m 0644 packaging/env.example $(DEST)/usr/lib/catprinter/env.example
 	install -D -m 0755 packaging/install.sh  $(DEST)/usr/lib/catprinter/install.sh
 	printf '%s\n' "$(VERSION_LINE)" > $(DEST)/usr/lib/catprinter/VERSION

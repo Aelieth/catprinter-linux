@@ -241,6 +241,33 @@ write_version_files() {
   printf '%s %s\n' "$(date -u +%FT%TZ)" "${DOWNLOAD:+download:$DOWNLOAD }$SRC_BIN" > "$SHARE/INSTALLED"
 }
 
+# Disable USB BT autosuspend on Wireless Controller interfaces (e0/01/01) and their
+# parent. Combo IAD cards are bDeviceClass=ef — a device-class e0 rule misses them.
+# Image ships the rule in /usr/lib/udev/rules.d; kit copies it to /etc.
+ensure_btusb_udev() {
+  local name=61-catprinter-btusb.rules src="" dest_etc dest_lib
+  dest_etc=/etc/udev/rules.d/$name
+  dest_lib=/usr/lib/udev/rules.d/$name
+  for c in "$KIT_DIR/$name" "$IMG_DIR/$name"; do
+    if [[ -f $c ]]; then src=$c; break; fi
+  done
+  if [[ -f $dest_lib ]]; then
+    if have udevadm; then
+      udevadm control --reload-rules >/dev/null 2>&1 || true
+      udevadm trigger --action=change --subsystem-match=usb >/dev/null 2>&1 || true
+    fi
+    ok "udev $dest_lib (USB Bluetooth autosuspend off)"
+    return 0
+  fi
+  [[ -n $src ]] || return 0
+  install -D -m 0644 "$src" "$dest_etc"
+  if have udevadm; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --action=change --subsystem-match=usb >/dev/null 2>&1 || true
+  fi
+  ok "udev $dest_etc (USB Bluetooth autosuspend off)"
+}
+
 # A kit-installed machine that rebased onto an image-baked image: the /etc units shadow the image's.
 migrate_kit_off_image() {
   warn "kit files found on an image-baked machine — $UNIT_DIR/catprinter*.service shadow the image's units; removing the kit"
@@ -289,6 +316,7 @@ do_install() {
     restorecon -R "$ETC" >/dev/null 2>&1 || true
     if ! image_baked; then restorecon -R "$BIN" "$SHARE" "$UNIT_DIR/catprinter.service" "$UNIT_DIR/catprinter-queue.service" >/dev/null 2>&1 || true; fi
   fi
+  ensure_btusb_udev
   systemctl daemon-reload
   systemctl enable "${UNITS[@]}" >/dev/null 2>&1 || true
   systemctl restart catprinter || { journalctl -u catprinter -n 30 --no-pager >&2 || true; die "catprinter.service failed to start"; }
@@ -320,6 +348,8 @@ do_uninstall() {
   else lpadmin -x "$QUEUE" 2>/dev/null || true; fi
   ok "queue $QUEUE removed"
   systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
+  rm -f /etc/udev/rules.d/61-catprinter-btusb.rules
+  if have udevadm; then udevadm control --reload-rules >/dev/null 2>&1 || true; fi
   if kit_present; then
     for u in "${UNITS[@]}"; do rm -f "$UNIT_DIR/$u"; done
     rm -f "$BIN"; rm -rf "$SHARE"

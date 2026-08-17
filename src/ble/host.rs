@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 /// BlueZ default when `TemporaryTimeout` is absent or commented in main.conf.
 pub const BLUEZ_DEFAULT_TEMPORARY_TIMEOUT: u32 = 30;
@@ -10,8 +11,47 @@ pub const BLUEZ_DEFAULT_TEMPORARY_TIMEOUT: u32 = 30;
 pub const DEFAULT_MAIN_CONF: &str = "/etc/bluetooth/main.conf";
 pub const DEFAULT_USB_DEVICES: &str = "/sys/bus/usb/devices";
 
+/// Kit and image both ship this name. Kit copies it to /etc; the image puts it in /usr/lib.
+pub const UDEV_RULE_NAME: &str = "61-catprinter-btusb.rules";
+pub const DEFAULT_UDEV_RULE_PATHS: &[&str] = &[
+    "/etc/udev/rules.d/61-catprinter-btusb.rules",
+    "/usr/lib/udev/rules.d/61-catprinter-btusb.rules",
+];
+
+/// How long to wait for a live advertisement (RSSI) or a held ACL before Connect.
+/// Combo radios take longer to leave LPS / patchram after abort; keep this
+/// short — it overlaps the inter-attempt pause, and a 5 s wait made a live
+/// printer miss the kid-facing 20 s target.
+pub fn advert_wait_for(chip: ChipFamily) -> Duration {
+    match chip {
+        ChipFamily::Realtek
+        | ChipFamily::Mediatek
+        | ChipFamily::Qualcomm
+        | ChipFamily::Broadcom => Duration::from_millis(2000),
+        _ => Duration::from_millis(800),
+    }
+}
+
+/// True when a shipped rule matches Wireless Controller *interfaces* (e0/01/01).
+/// A device-class-only e0 match is the combo-card trap and does not count.
+pub fn udev_rule_present_in(paths: &[&Path]) -> bool {
+    paths.iter().any(|p| {
+        fs::read_to_string(p).is_ok_and(|t| {
+            let t = t.to_ascii_lowercase();
+            t.contains("binterfaceclass") && t.contains("e0")
+        })
+    })
+}
+
+pub fn udev_rule_present() -> bool {
+    let paths: Vec<&Path> = DEFAULT_UDEV_RULE_PATHS.iter().map(Path::new).collect();
+    udev_rule_present_in(&paths)
+}
+
 /// Wireless Controller (Bluetooth) interface: bInterfaceClass/SubClass/Protocol e0/01/01.
 const IFACE_WIRELESS: (&str, &str, &str) = ("e0", "01", "01");
+/// Broadcom OEM remaps in btusb_table: USB_VENDOR_AND_INTERFACE_INFO(vid, 0xff, 0x01, 0x01).
+const IFACE_VENDOR_BT: (&str, &str, &str) = ("ff", "01", "01");
 /// Composite / IAD parent: bDeviceClass ef. Combo cards use this, not device-class e0.
 const DEVICE_MISC_IAD: &str = "ef";
 
@@ -31,6 +71,7 @@ pub enum ChipFamily {
     Realtek,
     Qualcomm,
     Intel,
+    Broadcom,
     Generic,
     None,
 }
@@ -42,6 +83,7 @@ impl ChipFamily {
             Self::Realtek => "realtek",
             Self::Qualcomm => "qca",
             Self::Intel => "intel",
+            Self::Broadcom => "broadcom",
             Self::Generic => "generic",
             Self::None => "none",
         }
@@ -49,8 +91,13 @@ impl ChipFamily {
 }
 
 /// Classify from sysfs `idVendor`/`idProduct` (hex) and the interface's bound driver.
-/// Driver name wins (btmtk / btrtl / btintel / btqca). Vendor 0489 is Foxconn OEM
-/// for both MediaTek and Qualcomm — those use the btusb quirk table, not vendor alone.
+///
+/// Driver name wins (`btmtk` / `btrtl` / `btintel` / `btqca` / `btbcm`). OEM VIDs
+/// that share silicon (Foxconn 0489, Azurewave 13d3, Lite-On 04ca, ASUS 0b05,
+/// Toshiba 0930) are mapped by PID the way `btusb` `quirks_table` does — never
+/// by VID alone. Native VIDs (0bda / 0e8d / 8087 / 0cf3 / 0a5c) are one family.
+///
+/// IDs: Linux `drivers/bluetooth/btusb.c` (`quirks_table` + `btusb_table`).
 pub fn chip_family_from_ids(vendor: &str, product: &str, driver: Option<&str>) -> ChipFamily {
     let drv = driver.unwrap_or("").to_ascii_lowercase();
     if drv.contains("btmtk") {
@@ -65,28 +112,128 @@ pub fn chip_family_from_ids(vendor: &str, product: &str, driver: Option<&str>) -
     if drv.contains("btqca") || drv.contains("ath3k") || drv.contains("hci_qca") {
         return ChipFamily::Qualcomm;
     }
+    if drv.contains("btbcm") {
+        return ChipFamily::Broadcom;
+    }
     let vid = u16::from_str_radix(vendor.trim().trim_start_matches("0x"), 16).unwrap_or(0);
     let pid = u16::from_str_radix(product.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+    if let Some(f) = quirk_family(vid, pid) {
+        return f;
+    }
     match vid {
         0x0bda => ChipFamily::Realtek,
         0x0e8d => ChipFamily::Mediatek,
         0x8087 => ChipFamily::Intel,
         0x0cf3 => ChipFamily::Qualcomm,
-        0x0489 => foxconn_family(pid),
+        0x0a5c | 0x05ac | 0x105b | 0x19ff => ChipFamily::Broadcom,
         _ if vid != 0 => ChipFamily::Generic,
         _ => ChipFamily::None,
     }
 }
 
-/// Foxconn 0489:e14e is MT7925 (btusb BTUSB_MEDIATEK); 0489:e0e3 is WCN6855 (QCA).
-fn foxconn_family(pid: u16) -> ChipFamily {
+/// OEM / remap PIDs from `btusb` `quirks_table`. `None` = fall through to VID.
+fn quirk_family(vid: u16, pid: u16) -> Option<ChipFamily> {
+    match vid {
+        0x0489 => foxconn_family(pid),
+        0x13d3 => azurewave_family(pid),
+        0x04ca => liteon_family(pid),
+        0x0b05 => asus_family(pid),
+        0x0930 => toshiba_family(pid),
+        0x04c5 => match pid {
+            0x165c | 0x1675 | 0x161f => Some(ChipFamily::Realtek),
+            0x1330 => Some(ChipFamily::Qualcomm),
+            _ => None,
+        },
+        0x10ab => match pid {
+            0x9108 | 0x9109 | 0x9208 | 0x9209 | 0x9308 | 0x9309 | 0x9408 | 0x9409 | 0x9508
+            | 0x9509 | 0x9608 | 0x9609 | 0x9f09 => Some(ChipFamily::Qualcomm),
+            _ => None,
+        },
+        0x2c7c => match pid {
+            0x0130..=0x0132 => Some(ChipFamily::Qualcomm),
+            0x7009 => Some(ChipFamily::Mediatek),
+            _ => None,
+        },
+        0x413c => match pid {
+            0x8126 | 0x8152 | 0x8156 => Some(ChipFamily::Broadcom),
+            _ => None,
+        },
+        0x050d => match pid {
+            0x0012 | 0x0013 => Some(ChipFamily::Broadcom),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Foxconn / Hon Hai 0489: QCA, MediaTek, Realtek, ATH3012 — never VID-wide.
+fn foxconn_family(pid: u16) -> Option<ChipFamily> {
     match pid {
-        0xe0c7 | 0xe0c9 | 0xe0ca | 0xe0cb | 0xe0cc | 0xe0ce | 0xe0d0 | 0xe0d6 | 0xe0de | 0xe0df
-        | 0xe0e1 | 0xe0e3 | 0xe0ea | 0xe0ec | 0xe0fc | 0xe0f3 | 0xe100 => ChipFamily::Qualcomm,
+        0xe092 | 0xe09f | 0xe0a2 | 0xe0c7 | 0xe0c9 | 0xe0ca | 0xe0cb | 0xe0cc | 0xe0ce | 0xe0d0
+        | 0xe0d6 | 0xe0de | 0xe0df | 0xe0e1 | 0xe0e3 | 0xe0ea | 0xe0ec | 0xe0fc | 0xe0f3
+        | 0xe100 | 0xe103 | 0xe10a | 0xe10d | 0xe11b | 0xe11c | 0xe11f | 0xe141 | 0xe14a
+        | 0xe14b | 0xe14d | 0xe04d | 0xe04e | 0xe056 | 0xe057 | 0xe05f | 0xe076 | 0xe078
+        | 0xe095 | 0xe036 | 0xe03c => Some(ChipFamily::Qualcomm),
         0xe0c8 | 0xe0cd | 0xe0e0 | 0xe0f2 | 0xe0d8 | 0xe0d9 | 0xe0e2 | 0xe0e4 | 0xe0f1 | 0xe0f5
         | 0xe0f6 | 0xe102 | 0xe111 | 0xe113 | 0xe118 | 0xe11e | 0xe124 | 0xe134 | 0xe135
-        | 0xe14e | 0xe14f | 0xe150 | 0xe151 => ChipFamily::Mediatek,
-        _ => ChipFamily::Generic,
+        | 0xe14e | 0xe14f | 0xe150 | 0xe151 | 0xe158 | 0xe11d | 0xe152 | 0xe153 | 0xe170
+        | 0xe174 | 0xe139 | 0xe13a | 0xe0fa | 0xe10f | 0xe110 | 0xe116 => {
+            Some(ChipFamily::Mediatek)
+        }
+        0xe085 | 0xe08b | 0xe112 | 0xe122 | 0xe123 | 0xe125 | 0xe12f | 0xe130 => {
+            Some(ChipFamily::Realtek)
+        }
+        _ => None,
+    }
+}
+
+/// Azurewave / IMC 13d3: Realtek, MediaTek, QCA, ATH3012.
+fn azurewave_family(pid: u16) -> Option<ChipFamily> {
+    match pid {
+        0x3529 | 0x3533 | 0x3548 | 0x3549 | 0x3553 | 0x3555 | 0x3570 | 0x3571 | 0x3572 | 0x3586
+        | 0x3587 | 0x3591 | 0x3592 | 0x3600 | 0x3601 | 0x3612 | 0x3616 | 0x3617 | 0x3618
+        | 0x3619 | 0x3394 | 0x3410 | 0x3414 | 0x3416 | 0x3458 | 0x3459 | 0x3461 | 0x3462
+        | 0x3494 | 0x3526 => Some(ChipFamily::Realtek),
+        0x3560 | 0x3563 | 0x3564 | 0x3567 | 0x3568 | 0x3576 | 0x3578 | 0x3579 | 0x3580 | 0x3583
+        | 0x3584 | 0x3585 | 0x3588 | 0x3594 | 0x3596 | 0x3602 | 0x3603 | 0x3604 | 0x3605
+        | 0x3606 | 0x3607 | 0x3608 | 0x3609 | 0x3610 | 0x3613 | 0x3614 | 0x3615 | 0x3620
+        | 0x3621 | 0x3622 | 0x3627 | 0x3628 | 0x3630 | 0x3633 => Some(ChipFamily::Mediatek),
+        0x3362 | 0x3375 | 0x3393 | 0x3395 | 0x3402 | 0x3408 | 0x3423 | 0x3432 | 0x3472 | 0x3474
+        | 0x3487 | 0x3490 | 0x3491 | 0x3496 | 0x3501 | 0x3623 | 0x3624 => {
+            Some(ChipFamily::Qualcomm)
+        }
+        _ => None,
+    }
+}
+
+/// Lite-On 04ca: QCA, MediaTek, Realtek, ATH3012.
+fn liteon_family(pid: u16) -> Option<ChipFamily> {
+    match pid {
+        0x4005..=0x4007 => Some(ChipFamily::Realtek),
+        0x3801 | 0x3802 | 0x3804 | 0x3807 | 0x38e4 => Some(ChipFamily::Mediatek),
+        0x3004 | 0x3005 | 0x3006 | 0x3007 | 0x3008 | 0x300b | 0x300d | 0x300f | 0x3010 | 0x3011
+        | 0x3014 | 0x3015 | 0x3016 | 0x3018 | 0x301a | 0x3021 | 0x3022 | 0x3023 | 0x3024
+        | 0x3a22 | 0x3a24 | 0x3a26 | 0x3a27 => Some(ChipFamily::Qualcomm),
+        _ => None,
+    }
+}
+
+/// ASUSTek 0b05: Realtek, ATH3012, a few Broadcom dongles.
+fn asus_family(pid: u16) -> Option<ChipFamily> {
+    match pid {
+        0x17dc | 0x185c | 0x18ef | 0x190e => Some(ChipFamily::Realtek),
+        0x17d0 => Some(ChipFamily::Qualcomm),
+        0x1715 => Some(ChipFamily::Broadcom),
+        _ => None,
+    }
+}
+
+/// Toshiba 0930: Realtek 8723AE + ATH3012.
+fn toshiba_family(pid: u16) -> Option<ChipFamily> {
+    match pid {
+        0x021d => Some(ChipFamily::Realtek),
+        0x0219 | 0x021c | 0x0220 | 0x0227 => Some(ChipFamily::Qualcomm),
+        _ => None,
     }
 }
 
@@ -97,6 +244,7 @@ pub struct HostFacts {
     pub temporary_timeout_is_default: bool,
     pub combo: bool,
     pub chip: ChipFamily,
+    pub udev: bool,
     pub bt_interfaces: Vec<BtUsbInterface>,
 }
 
@@ -133,12 +281,13 @@ impl HostFacts {
     }
 
     /// Labels + values printed by `catprinterd check` (does not affect READY).
-    pub fn check_lines(&self) -> [(&'static str, String); 4] {
+    pub fn check_lines(&self) -> [(&'static str, String); 5] {
         [
             ("TemporaryTimeout", self.temporary_timeout_line()),
             ("combo", self.combo_line().to_string()),
             ("bt chip", self.chip.as_str().to_string()),
             ("power/control", self.power_control_line()),
+            ("udev", if self.udev { "present" } else { "absent" }.into()),
         ]
     }
 }
@@ -186,6 +335,18 @@ fn is_wireless_controller(class: &str, subclass: &str, protocol: &str) -> bool {
         && eq_hex(protocol, IFACE_WIRELESS.2)
 }
 
+/// Broadcom combo remaps: vendor-specific 0xff/0x01/0x01 (btusb_table BCM_PATCHRAM).
+fn is_vendor_bt_iface(class: &str, subclass: &str, protocol: &str) -> bool {
+    eq_hex(class, IFACE_VENDOR_BT.0)
+        && eq_hex(subclass, IFACE_VENDOR_BT.1)
+        && eq_hex(protocol, IFACE_VENDOR_BT.2)
+}
+
+fn is_bt_usb_iface(class: &str, subclass: &str, protocol: &str) -> bool {
+    is_wireless_controller(class, subclass, protocol)
+        || is_vendor_bt_iface(class, subclass, protocol)
+}
+
 /// Parent USB device name of an interface entry (`3-4:1.0` → `3-4`, `3-4.1:1.0` → `3-4.1`).
 fn usb_parent_name(iface: &str) -> Option<&str> {
     iface
@@ -194,8 +355,9 @@ fn usb_parent_name(iface: &str) -> Option<&str> {
         .filter(|p| !p.is_empty())
 }
 
-/// Scan a sysfs usb-devices tree. Combo = composite (`ef`) parent **and** e0/01/01
-/// *interfaces*. A device-class-only `e0` match is the udev trap and is not combo.
+/// Scan a sysfs usb-devices tree. Combo = composite (`ef`) parent **and** a BT
+/// interface (`e0/01/01` or Broadcom's `ff/01/01`). A device-class-only `e0`
+/// match is the udev trap and is not combo.
 pub fn usb_bt_facts(usb_devices: &Path) -> (bool, Vec<BtUsbInterface>) {
     let entries = match fs::read_dir(usb_devices) {
         Ok(rd) => rd,
@@ -218,7 +380,7 @@ pub fn usb_bt_facts(usb_devices: &Path) -> (bool, Vec<BtUsbInterface>) {
         ) else {
             continue;
         };
-        if !is_wireless_controller(&class, &sub, &proto) {
+        if !is_bt_usb_iface(&class, &sub, &proto) {
             continue;
         }
         let parent = usb_parent_name(&name);
@@ -290,6 +452,7 @@ pub fn collect_host_facts(usb_devices: &Path, main_conf: &Path) -> HostFacts {
         temporary_timeout_is_default,
         combo,
         chip,
+        udev: udev_rule_present(),
         bt_interfaces,
     }
 }
@@ -425,6 +588,55 @@ mod tests {
         let lines = facts.check_lines();
         assert_eq!(lines[2], ("bt chip", "none".into()));
         assert_eq!(lines[3], ("power/control", "no BT USB interfaces".into()));
+        assert_eq!(lines[4].0, "udev");
+    }
+
+    #[test]
+    fn advert_wait_is_longer_on_combo_firmware() {
+        let combo = advert_wait_for(ChipFamily::Realtek);
+        assert_eq!(combo, advert_wait_for(ChipFamily::Mediatek));
+        assert_eq!(combo, advert_wait_for(ChipFamily::Qualcomm));
+        assert_eq!(combo, advert_wait_for(ChipFamily::Broadcom));
+        assert!(combo > advert_wait_for(ChipFamily::Intel));
+        assert!(combo > advert_wait_for(ChipFamily::Generic));
+        assert!(combo > advert_wait_for(ChipFamily::None));
+        assert_eq!(
+            advert_wait_for(ChipFamily::Intel),
+            Duration::from_millis(800)
+        );
+        assert_eq!(combo, Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn udev_rule_requires_interface_class_e0() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.rules");
+        let trap = dir.path().join("trap.rules");
+        write(
+            &good,
+            r#"ATTR{bInterfaceClass}=="e0", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="01", ATTR{power/control}="on"
+"#,
+        );
+        write(
+            &trap,
+            r#"# device-class only — the combo-card trap
+ATTR{bDeviceClass}=="e0", ATTR{power/control}="on"
+"#,
+        );
+        assert!(udev_rule_present_in(&[good.as_path()]));
+        assert!(!udev_rule_present_in(&[trap.as_path()]));
+        assert!(!udev_rule_present_in(&[dir
+            .path()
+            .join("missing")
+            .as_path()]));
+        let shipped = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/packaging/61-catprinter-btusb.rules"
+        ));
+        assert!(
+            udev_rule_present_in(&[shipped]),
+            "kit/image rule must match Wireless Controller interfaces"
+        );
     }
 
     #[test]
@@ -453,7 +665,92 @@ mod tests {
             chip_family_from_ids("8087", "0033", Some("btintel")),
             ChipFamily::Intel
         );
+        assert_eq!(
+            chip_family_from_ids("0a5c", "21e1", Some("btbcm")),
+            ChipFamily::Broadcom
+        );
         assert_eq!(chip_family_from_ids("", "", None), ChipFamily::None);
+    }
+
+    /// Survey samples from `btusb` quirks_table. Expected family is the kernel
+    /// firmware class, not a copy of our match arms.
+    #[test]
+    fn survey_samples_match_kernel_firmware_family() {
+        let samples: &[(&str, &str, ChipFamily)] = &[
+            ("0bda", "b00c", ChipFamily::Realtek),  // RTL8822CE
+            ("0489", "e14e", ChipFamily::Mediatek), // Foxconn MT7925
+            ("0489", "e0e3", ChipFamily::Qualcomm), // Foxconn WCN6855
+            ("0489", "e123", ChipFamily::Realtek),  // Foxconn RTL8852BE
+            ("13d3", "3571", ChipFamily::Realtek),  // Azurewave RTL8852BE
+            ("13d3", "3602", ChipFamily::Mediatek), // Azurewave MT7925
+            ("13d3", "3491", ChipFamily::Qualcomm), // Azurewave QCA ROME
+            ("04ca", "4005", ChipFamily::Realtek),  // Lite-On RTL8822CE
+            ("04ca", "3802", ChipFamily::Mediatek), // Lite-On MT7921
+            ("04ca", "3022", ChipFamily::Qualcomm), // Lite-On WCN6855
+            ("0b05", "18ef", ChipFamily::Realtek),  // ASUS RTL8822CE
+            ("0a5c", "21e1", ChipFamily::Broadcom), // Broadcom SoftSailing
+            ("05ac", "8213", ChipFamily::Broadcom), // Apple MBP BCM
+            ("8087", "0033", ChipFamily::Intel),    // Intel AX211
+            ("0cf3", "e007", ChipFamily::Qualcomm), // QCA ROME
+            ("0e8d", "223c", ChipFamily::Mediatek), // MT7922A
+            ("10ab", "9308", ChipFamily::Qualcomm), // USI WCN6855
+            ("2c7c", "7009", ChipFamily::Mediatek), // Quectel MT7925
+            ("413c", "8126", ChipFamily::Broadcom), // Dell Broadcom
+        ];
+        for &(vid, pid, want) in samples {
+            assert_eq!(
+                chip_family_from_ids(vid, pid, None),
+                want,
+                "{vid}:{pid} must follow the kernel quirk family"
+            );
+            assert_eq!(
+                advert_wait_for(chip_family_from_ids(vid, pid, None)),
+                advert_wait_for(want),
+                "{vid}:{pid} wait follows the same family"
+            );
+        }
+        // Unknown PID on a shared OEM VID is not Broadcom-by-VID.
+        assert_eq!(
+            chip_family_from_ids("0489", "ffff", None),
+            ChipFamily::Generic
+        );
+        assert_eq!(
+            chip_family_from_ids("13d3", "0001", None),
+            ChipFamily::Generic
+        );
+    }
+
+    #[test]
+    fn check_chip_label_follows_classifier_on_combo_sysfs() {
+        let dir = tempfile::tempdir().unwrap();
+        combo_tree(dir.path());
+        write(&dir.path().join("3-4/idVendor"), "13d3\n");
+        write(&dir.path().join("3-4/idProduct"), "3571\n");
+        write(&dir.path().join("main.conf"), "TemporaryTimeout = 0\n");
+        let facts = collect_host_facts(dir.path(), &dir.path().join("main.conf"));
+        assert!(facts.combo);
+        assert_eq!(facts.chip, ChipFamily::Realtek);
+        assert_eq!(
+            facts.check_lines()[2],
+            ("bt chip", "realtek".into()),
+            "check label must come from the shipped classifier"
+        );
+    }
+
+    #[test]
+    fn broadcom_ff_iface_on_ef_parent_is_combo() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("3-4/bDeviceClass"), "ef\n");
+        write(&dir.path().join("3-4/idVendor"), "0a5c\n");
+        write(&dir.path().join("3-4/idProduct"), "21e1\n");
+        write(&dir.path().join("3-4/power/control"), "auto\n");
+        write(&dir.path().join("3-4:1.0/bInterfaceClass"), "ff\n");
+        write(&dir.path().join("3-4:1.0/bInterfaceSubClass"), "01\n");
+        write(&dir.path().join("3-4:1.0/bInterfaceProtocol"), "01\n");
+        let facts = collect_host_facts(dir.path(), Path::new("/no/such/main.conf"));
+        assert!(facts.combo, "ef + ff/01/01 is the Broadcom combo shape");
+        assert_eq!(facts.chip, ChipFamily::Broadcom);
+        assert_eq!(facts.check_lines()[2], ("bt chip", "broadcom".into()));
     }
 
     #[test]

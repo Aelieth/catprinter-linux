@@ -1,56 +1,49 @@
-# catprinter-linux — `catprinterd`
+### Because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
 
-**Bluetooth "cat" thermal printers as regular Linux printers.** `catprinterd` is a small Rust daemon
-that turns an MXW01 (and the GB0x/GT01/MX0x/YT01/X5/X6 family) into a driverless **IPP Everywhere**
-printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer: no PPD to install, no
-per-user setup, works for every account on the machine, survives reboots without anyone logging in.
+![It's Hack o' Clock!](media/hackoclock.jpg)
+
+*Meet the star: a pocket-sized Bluetooth thermal cat that prints “It’s Hack o’ Clock” and whatever else a kid (or tired adult) desires — once Linux is taught how to talk to it properly.*
+
+You bought the cutest, cheapest little thermal printer on the internet. It has a face. It has ears. It costs less than lunch. And then you tried to use it on Linux.
+
+Bluetooth Low Energy + BlueZ + combo wireless cards that secretly dislike cats + an official phone app that hogs the single connection = a special kind of chaos. An entire program had to be written so this $12 device would behave like a normal printer.
+
+**catprinterd** is that program: a small, hardened Rust daemon that turns an MXW01 (and the GB0x / GT01 / MX0x / YT01 / X5 / X6 family) into a driverless **IPP Everywhere** printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer. No PPD to install, no per-user setup, works for every account on the machine, and survives reboots without anyone logging in.
 
 ```
-File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──► catprinterd ──► Bluetooth LE ──► 🐈
+File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──► catprinterd ──► Bluetooth LE ──► 🐈 *purrs and prints*
 ```
 
-* **Kid contract:** Bluetooth on, printer on, print. No pairing, no MAC addresses, no apps.
-* **Hold-and-wait:** if the printer is off, the job waits (10 min by default) and the queue says
-  *"Cat printer not found — turn it on and keep it near the computer"*. Switch it on → it prints.
-* **Immutable-first:** one self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two
-  systemd units, one env file. Nothing layered into rpm-ostree; runtime needs only base-image
-  packages (`cups`, `cups-filters`, `bluez`, `util-linux`, `policycoreutils`, `curl`; `avahi`
-  optional).
-* **Model autodetect:** MXW01 (16-level grayscale) or the classic family; new printer → it just works.
+### The Sacred Kid Contract 🤝
 
-## Install (admin, once per machine)
+1. Bluetooth is on  
+2. The cat printer is on  
+3. Hit Print  
+
+No pairing. No MAC addresses. No phone apps. That is the entire contract.
+
+- **Hold-and-wait magic:** If the printer is off, the job waits (10 minutes by default) and the queue says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints. If the cat is already awake, the print should start in a few seconds — they nap after ~5 minutes of boredom, so don’t make them wait for us.  
+- **Immutable-first:** One self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two systemd units, one env file. Nothing layered into rpm-ostree; runtime needs only base-image packages (`cups`, `cups-filters`, `bluez`, `util-linux`, `policycoreutils`, `curl`; `avahi` optional).  
+- **Model autodetect:** MXW01 (16-level grayscale) or the classic family; a new printer simply works.
+
+## Install (admin, once per machine) — Make the cat official
 
 Grab the kit (`make kit` → `dist/catprinter-kit/`, or the release tarball) and run:
 
 ```sh
 sudo ./install.sh              # install or upgrade
-sudo ./install.sh status       # units, health, CUPS queue, journal
+sudo ./install.sh status       # units, health, CUPS queue, journal — how is the cat feeling?
 sudo ./install.sh update       # swap binary, restart, regenerate the CUPS PPD
 sudo ./install.sh uninstall    # remove queue + units (+ --purge for /etc/catprinter)
 ```
 
-What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon,
-`DynamicUser`, hardened) and `catprinter-queue.service` (a root oneshot that runs
-`lpadmin -p CatPrinter -m everywhere …` at every boot, so the queue self-heals), creates
-`/etc/catprinter/env`, and prints a status table. Old per-user `mxw01d` units are removed.
+What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon, `DynamicUser`, hardened) and `catprinter-queue.service` (a root oneshot that runs `lpadmin -p CatPrinter -m everywhere …` at every boot so the queue self-heals), creates `/etc/catprinter/env`, installs a udev rule so combo Wi-Fi/Bluetooth cards don’t nap mid-Connect (`61-catprinter-btusb.rules`), and prints a status table. Old per-user `mxw01d` units are removed.
 
-**Image-baked (custom uBlue image):** `make image-files DEST=<rootfs>` drops the same files into
-`/usr/bin`, `/usr/lib/systemd/system`, the `etc/systemd/system/multi-user.target.wants/` symlinks
-(= `systemctl enable` at build time — presets alone only fire on a true first boot, not on a
-rebase), a `system-preset`, and `/usr/lib/catprinter/{VERSION,install.sh,env.example}`.
-Containerfile: `COPY image-root/ /`. Zero per-machine steps, on first boot and on every rebase.
-On such a machine `install.sh` only manages `/etc/catprinter/env` and the unit state:
-`--download/--binary` are ignored (the image always wins — ship a new image to update), a
-kit-installed machine that rebased onto the image is migrated (`install.sh install` removes the
-kit files that shadow the image's units), and after `uninstall` the units come back with
-`install.sh install`. `VERSION` files are one line, `<semver> <git-sha> <build-utc>`; field 1 is
-the semver. See [packaging/KIT-README.md](packaging/KIT-README.md).
+**Image-baked (custom uBlue / ostree image):** `make image-files DEST=<rootfs>` drops the same files into `/usr/bin`, `/usr/lib/systemd/system`, the `etc/systemd/system/multi-user.target.wants/` symlinks (so they are enabled at build time), a system-preset, `/usr/lib/udev/rules.d/61-catprinter-btusb.rules`, and `/usr/lib/catprinter/{VERSION,install.sh,env.example}`. Containerfile: `COPY image-root/ /`. Zero per-machine steps on first boot and on every rebase. On such a machine `install.sh` only manages `/etc/catprinter/env` and unit state; the image always wins. See [packaging/KIT-README.md](packaging/KIT-README.md).
 
-Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPRINTER_DEVICE`
-(pin one printer), `CATPRINTER_MODEL` (`auto|mxw01|classic`), `CATPRINTER_PRINTER_WAIT`,
-`CATPRINTER_PORT`, `CATPRINTER_DNSSD`, `CATPRINTERD_ARGS` (e.g. `--fake-printer DIR` for testing).
+Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPRINTER_DEVICE` (pin one printer), `CATPRINTER_MODEL` (`auto|mxw01|classic`), `CATPRINTER_PRINTER_WAIT`, `CATPRINTER_PORT`, `CATPRINTER_DNSSD`, `CATPRINTERD_ARGS` (e.g. `--fake-printer DIR` for testing).
 
-## In the print dialog
+## In the print dialog — What will the cat eat today?
 
 | Setting | Choices | What happens |
 |---|---|---|
@@ -58,27 +51,27 @@ Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPR
 | Print quality | **Normal** (drawings), Draft (sharp text), High (photos → 16-level grayscale on the MXW01) | selects dithering / grayscale / burn intensity |
 | Copies, n-up, landscape | as usual | CUPS handles them |
 
-Kids never need to touch these; the defaults print drawings and text nicely.
-Never make CatPrinter the *default* printer (homework on 48 mm tape); `install.sh` warns if it is.
+Kids never need to touch these; the defaults print drawings and text nicely.  
+Never make CatPrinter the *default* printer (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
 
-## Troubleshooting (what the queue says → what to do)
+## Troubleshooting — When the cat is grumpy 😿
 
-| Queue message (`lpstat -p CatPrinter -l`, GNOME/KDE printer applet) | Do this |
+| Queue message (`lpstat -p CatPrinter -l`, GNOME/KDE printer applet) | What to do (cat-whisperer edition) |
 |---|---|
-| Cat printer not found — turn it on and keep it near the computer | Power the printer on (and close the phone app; it allows one connection). The job continues by itself. |
-| Bluetooth is turned off on this computer | Turn Bluetooth on (`rfkill unblock bluetooth`). |
-| The cat printer is out of paper. | Load a roll, close the lid. |
-| The cat printer is too hot / battery is low | Wait a minute / charge it. |
+| Cat printer not found — turn it on and keep it near the computer | Power the printer on (and close the phone app; it allows only one connection). The job continues by itself. |
+| Could not connect to the cat printer… | Close the phone app; if Bluetooth Settings is holding it, turn the printer off and on. Keep it next to the computer. The job keeps trying. |
+| Bluetooth is turned off on this computer | Turn Bluetooth on (`rfkill unblock bluetooth`). The cat cannot hear you otherwise. |
+| The cat printer is out of paper. | Load a roll, close the lid. Hungry cats need paper. |
+| The cat printer is too hot / battery is low | Wait a minute / charge it. Even cats need rest. |
 | Cat printer not found for 10 min — job N stopped | The job gave up; turn the printer on and print again. |
-| Print would be … long; limit … | Pick a shorter page size or split the document. |
+| Print would be … long; limit … | Pick a shorter page size or split the document. The tape has limits. |
+| The print stopped partway (Bluetooth dropped)… | Move the printer next to the computer and print again (a retry would reprint the bit that already came out). |
 | queue missing / daemon down | `sudo ./install.sh status`, `journalctl -u catprinter -u catprinter-queue`, `sudo ./install.sh update` |
-| two "Cat Printer" entries in the dialog | the daemon adopts the CUPS queue's uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
+| two “Cat Printer” entries in the dialog | the daemon adopts the CUPS queue’s uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
 
-`catprinterd check` (Bluetooth adapter / bluetoothd / port, plus read-only host facts:
-TemporaryTimeout, combo-card heuristic, `bt chip`, USB BT `power/control`) and `catprinterd status`
-(connects to the printer, reports model, battery, paper) are handy on the console.
+`catprinterd check` (Bluetooth adapter / bluetoothd / port, plus read-only host facts: TemporaryTimeout, combo, `bt chip`, USB BT `power/control`, `udev`) and `catprinterd status` (connects to the printer, reports model, battery, paper) are handy on the console. `bt chip` names the USB Bluetooth family (realtek / mediatek / qca / intel / broadcom) even when the laptop badge is Foxconn or Azurewave. `udev present` means the combo-card autosuspend rule is installed.
 
-## Developing
+## Developing — For the grown-up cats who like to tinker
 
 ```sh
 make check                      # fmt, clippy -D warnings, tests, shell lint, unit verify
@@ -92,52 +85,13 @@ cargo run -- print media/hackoclock.jpg -q high    # straight to the printer ove
 cargo run -- print file.png --preview-only out.png # render only
 ```
 
-* `--fake-printer DIR` writes `job-N-*.png` (what the head would burn) + `job-N.json` per job and
-  is scripted by `DIR/state` (`ok|off|no-paper|overheated|low-battery|slow|flaky:N`).
-* Raster fixtures come from CUPS itself: `scripts/make-fixtures.sh` (uses `cupsfilter`).
-* Layout: `src/protocol` (wire formats), `src/models` (registry + drivers), `src/ble` (BlueZ over
-  D-Bus), `src/raster` (PWG decode), `src/render` (trim/fit/dither/pack), `src/ipp` + `src/http`
-  (IPP Everywhere), `src/engine` (queue/worker), `src/dnssd` (Avahi), `src/cupsq` (uuid adoption).
-* Protocol notes: [PROTOCOL.md](PROTOCOL.md). The Python driver this was ported from (and its
-  hardware-proven BLE quirks) is preserved at git tag `python-final`; source comments cite it as
-  `catprinter/*.py`.
-* `make fleet-test` (`scripts/fleet-test.sh`, also a CI job) builds two Fedora systemd
-  containers from `dist/` and boots them with podman: an image-baked machine in the *rebase*
-  case (no first boot ⇒ no presets; the shipped wants symlinks must enable the units; a print
-  goes through real CUPS into `--fake-printer`), and a plain machine that takes the kit path and
-  then "rebases" onto the image (kit → image migration, uninstall/`--purge` idempotence).
-  `KEEP=1` keeps the containers, `FLEET_FIRST_BOOT=1` adds the preset/first-boot variant, logs
-  land in `tests/out/fleet/`. From a distrobox: `PODMAN="distrobox-host-exec podman"` (rootless
-  works; the machines come up `degraded` because of `/sys/kernel/*` mounts, which is accepted).
-* Hardware notes (MXW01, this project): connects reliably at MTU 512. The printer is never
-  paired, so BlueZ may delete its Device1 object after `TemporaryTimeout` (default 30 s);
-  every Connect re-resolves a live path by address instead of reusing the discovery-time
-  object. Combo Wi-Fi/BT cards also abort pending connects (`le-connection-abort-by-local`);
-  the daemon classifies prune / host-abort / timeout / adapter-off, waits longer after a
-  host abort, keeps LE scan running (StopDiscovery mid-retry USB-resets combo firmware),
-  and if the adapter drops Powered it issues Set Powered and waits for re-enumeration. It still retries 3 attempts
-  per round (12 s each) until `CATPRINTER_PRINTER_WAIT`. Strips longer than 4000 lines
-  (multi-request segments) and the "Bluetooth Settings holds the link" path are implemented but
-  were not exercised on hardware. Machines with more than one Bluetooth adapter: the daemon uses
-  the first powered adapter; pin one with `CATPRINTER_ADAPTER=hci1` in `/etc/catprinter/env`, and
-  pin the printer itself per machine with `CATPRINTER_DEVICE=<MAC or name>` when several cat
-  printers are in range. `catprinterd status` exit codes: 0 = printer answered and is ready,
-  2 = it answered but is not ready (no paper, too hot, low battery) or the connection failed
-  (Bluetooth off, link held by another app — `catprinterd check` tells which), 3 = no cat
-  printer found (turn it on, come closer).
+* `--fake-printer DIR` writes `job-N-*.png` (what the head would burn) + `job-N.json` per job and is scripted by `DIR/state` (`ok|off|no-paper|overheated|low-battery|slow|flaky:N`).  
+* Raster fixtures come from CUPS itself: `scripts/make-fixtures.sh` (uses `cupsfilter`).  
+* Layout: `src/protocol` (wire formats), `src/models` (registry + drivers), `src/ble` (BlueZ over D-Bus), `src/raster` (PWG decode), `src/render` (trim/fit/dither/pack), `src/ipp` + `src/http` (IPP Everywhere), `src/engine` (queue/worker), `src/dnssd` (Avahi), `src/cupsq` (uuid adoption).
 
-### Supported models
+---
 
-| Family | Names | Verified here |
-|---|---|---|
-| MXW01 | `MXW01` — 384 px, 1-bit + 4-bit grayscale | yes (hardware) |
-| classic (upstream rbaron/catprinter set) | GB01 GB02 GB03 GT01 MX05 MX06 MX08 MX09 MX10 MX11 YT01 X5 X6 — 384 px, 1-bit | protocol ported byte-for-byte from the reference implementation; **not hardware-tested by this project** — reports welcome |
+Made so kids can simply print.  
+Cat printer is ready. Linux is ready.  
 
-Unknown names that advertise the AE30 service are driven by GATT shape (AE03 present ⇒ MXW01
-protocol, else classic); force with `CATPRINTER_MODEL=`.
-
-## Credits
-
-Built on the reverse engineering of the cat-printer community: [rbaron/catprinter](https://github.com/rbaron/catprinter)
-(classic family), [jeremy46231/MXW01-catprinter](https://github.com/jeremy46231/MXW01-catprinter) and
-[MaikelChan/CatPrinterBLE](https://github.com/MaikelChan/CatPrinterBLE) (MXW01, 4-bit grayscale). MIT licensed.
+Meow.

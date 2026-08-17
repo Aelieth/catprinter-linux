@@ -1,6 +1,6 @@
 //! `catprinterd check`: is the system ready to print? D-Bus, bluetoothd, a powered adapter, and
 //! whether our port is free or already answered by a running daemon. Also prints read-only host
-//! facts (TemporaryTimeout, combo card, USB BT power/control) that do not affect READY.
+//! facts (TemporaryTimeout, combo card, USB BT power/control, udev) that do not affect READY.
 //! Exit 0 only when ready.
 
 use std::time::Duration;

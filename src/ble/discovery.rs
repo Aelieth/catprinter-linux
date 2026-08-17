@@ -13,6 +13,11 @@ use crate::printer::PrintError;
 use crate::protocol::mxw01::SCAN_TIMEOUT_S;
 use crate::protocol::SERVICE_UUIDS;
 
+/// How often to re-read managed objects while scanning.
+pub const SCAN_POLL: Duration = Duration::from_millis(150);
+/// After the first live advert, wait this long for a stronger one (autodetect).
+pub const SCAN_SETTLE: Duration = Duration::from_millis(350);
+
 /// `--device`: a MAC address / BlueZ device id, or an advertised name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceHint {
@@ -258,7 +263,7 @@ pub async fn scan(
     let mut settle_until: Option<Instant> = None;
     // Poll the object tree; RSSI/name arrive within a few hundred ms of the first advertisement.
     while Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(SCAN_POLL).await;
         let objs = bluez::managed_objects(conn).await?;
         let cands = candidates_from(&objs, &adapter.path, hint, avoid);
         // During a scan only trust devices that are actually advertising now (have RSSI) or connected.
@@ -274,7 +279,7 @@ pub async fn scan(
                 break;
             }
             match settle_until {
-                None => settle_until = Some(Instant::now() + Duration::from_millis(1000)),
+                None => settle_until = Some(Instant::now() + SCAN_SETTLE),
                 Some(t) if Instant::now() >= t => break,
                 Some(_) => {}
             }
@@ -559,6 +564,21 @@ mod tests {
         let held = c(Some("MXW01"), "AA:00:00:00:00:03", None, true, &[]);
         let best = pick_after_settle(best, std::slice::from_ref(&held));
         assert_eq!(best.unwrap().address, held.address);
+    }
+
+    #[test]
+    fn scan_settle_is_short_enough_for_kids() {
+        assert!(SCAN_SETTLE <= Duration::from_millis(400));
+        assert!(SCAN_POLL <= Duration::from_millis(200));
+        let src = include_str!("discovery.rs");
+        let start = src.find("pub async fn scan").expect("scan");
+        let end = src.find("pub async fn stop_scan").expect("stop_scan");
+        let block = &src[start..end];
+        assert!(
+            block.contains("SCAN_SETTLE"),
+            "autodetect settle must use SCAN_SETTLE, not a 1 s literal"
+        );
+        assert!(block.contains("SCAN_POLL"));
     }
 
     #[test]

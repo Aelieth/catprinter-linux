@@ -411,6 +411,28 @@ pub fn adapter_from_device_path(device_path: &str) -> Option<&str> {
 pub struct LiveDevice {
     pub path: String,
     pub rssi: Option<i16>,
+    pub connected: bool,
+}
+
+/// Whether we may issue Device1.Connect *now*.
+///
+/// A cache hit with no RSSI (TemporaryTimeout=0 keeps unpaired objects forever)
+/// is not connectable: BlueZ will page-timeout for the full CONNECT_TIMEOUT_S
+/// while the printer is not advertising. Combo cards (RTL8822CE / MT7925)
+/// make that timeout the dominant failure after the kit sets TemporaryTimeout=0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectReadiness {
+    Ready,
+    Silent,
+    Missing,
+}
+
+pub fn connect_readiness(dev: Option<&LiveDevice>) -> ConnectReadiness {
+    match dev {
+        None => ConnectReadiness::Missing,
+        Some(d) if d.connected || d.rssi.is_some() => ConnectReadiness::Ready,
+        Some(_) => ConnectReadiness::Silent,
+    }
 }
 
 /// Look up a live Device1 for `address` under `adapter_path`.
@@ -439,15 +461,19 @@ pub fn resolve_device_from_objects(
             return Some(LiveDevice {
                 path,
                 rssi: prop_i16(props, "RSSI"),
+                connected: prop_bool(props, "Connected").unwrap_or(false),
             });
         }
     }
     let conventional = device_path_for(adapter_path, address);
     if objs.keys().any(|p| p.as_str() == conventional) {
-        let rssi = iface_props(objs, &conventional, IFACE_DEVICE).and_then(|p| prop_i16(p, "RSSI"));
+        let props = iface_props(objs, &conventional, IFACE_DEVICE);
         return Some(LiveDevice {
             path: conventional,
-            rssi,
+            rssi: props.and_then(|p| prop_i16(p, "RSSI")),
+            connected: props
+                .and_then(|p| prop_bool(p, "Connected"))
+                .unwrap_or(false),
         });
     }
     None
@@ -522,6 +548,26 @@ pub async fn resolve_device_path(
     Ok(resolve_device_from_objects(&objs, adapter_path, address))
 }
 
+/// Poll until the device is advertising (RSSI) or already Connected, or `budget` elapses.
+pub async fn wait_until_ready_to_connect(
+    conn: &Connection,
+    adapter_path: &str,
+    address: &str,
+    budget: Duration,
+) -> Result<Option<LiveDevice>, PrintError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let live = resolve_device_path(conn, adapter_path, address).await?;
+        if connect_readiness(live.as_ref()) == ConnectReadiness::Ready {
+            return Ok(live);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(live);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Why a Connect attempt failed. Stable `as_str` prefixes go into journal / `ConnectFailed.last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectFailureKind {
@@ -533,6 +579,8 @@ pub enum ConnectFailureKind {
     Timeout,
     /// Adapter powered off / NotReady.
     AdapterOff,
+    /// Device1 exists (often TemporaryTimeout=0) but is not advertising and not held.
+    NotAdvertising,
     Other,
 }
 
@@ -543,6 +591,7 @@ impl ConnectFailureKind {
             Self::HostAbort => "host-abort",
             Self::Timeout => "timeout",
             Self::AdapterOff => "adapter-off",
+            Self::NotAdvertising => "not-advertising",
             Self::Other => "other",
         }
     }
@@ -720,6 +769,47 @@ mod tests {
     }
 
     #[test]
+    fn connect_readiness_requires_rssi_or_held() {
+        assert_eq!(connect_readiness(None), ConnectReadiness::Missing);
+        let silent = LiveDevice {
+            path: "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF".into(),
+            rssi: None,
+            connected: false,
+        };
+        assert_eq!(connect_readiness(Some(&silent)), ConnectReadiness::Silent);
+        let adv = LiveDevice {
+            rssi: Some(-52),
+            ..silent.clone()
+        };
+        assert_eq!(connect_readiness(Some(&adv)), ConnectReadiness::Ready);
+        let held = LiveDevice {
+            connected: true,
+            rssi: None,
+            ..silent
+        };
+        assert_eq!(connect_readiness(Some(&held)), ConnectReadiness::Ready);
+    }
+
+    #[test]
+    fn resolve_silent_cache_is_not_ready() {
+        let mut objs: Objects = Default::default();
+        insert_iface(
+            &mut objs,
+            "/org/bluez/hci0/dev_48_0F_57_17_06_9D",
+            IFACE_DEVICE,
+            vec![
+                ("Address", Value::from("48:0F:57:17:06:9D")),
+                ("Connected", Value::from(false)),
+            ],
+        );
+        let live =
+            resolve_device_from_objects(&objs, "/org/bluez/hci0", "48:0F:57:17:06:9D").unwrap();
+        assert!(live.rssi.is_none());
+        assert!(!live.connected);
+        assert_eq!(connect_readiness(Some(&live)), ConnectReadiness::Silent);
+    }
+
+    #[test]
     fn resolve_none_when_pruned() {
         let objs: Objects = Default::default();
         assert!(
@@ -831,6 +921,10 @@ mod tests {
         assert_eq!(
             ConnectFailureKind::Timeout.format_last("timed out"),
             "timeout: timed out"
+        );
+        assert_eq!(
+            ConnectFailureKind::NotAdvertising.format_last("Device1 exists but is not advertising"),
+            "not-advertising: Device1 exists but is not advertising"
         );
     }
 

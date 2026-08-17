@@ -117,6 +117,8 @@ jobs:
           test -L dist/image-root/etc/systemd/system/multi-user.target.wants/catprinter.service
           test -L dist/image-root/etc/systemd/system/multi-user.target.wants/catprinter-queue.service
           test -x dist/image-root/usr/lib/catprinter/install.sh
+          test -f dist/catprinter-kit/61-catprinter-btusb.rules
+          test -f dist/image-root/usr/lib/udev/rules.d/61-catprinter-btusb.rules
           ls -la dist/ dist/catprinter-kit/
 
       # Tar the whole dist tree before uploading: the image-root ships

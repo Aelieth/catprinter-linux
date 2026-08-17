@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.4 — 2026-08-17
+
+TemporaryTimeout=0 left unpaired Device1 objects with no RSSI; Connect
+page-timed-out for 12 s on combo cards. OEM remaps classified as generic,
+Broadcom was missing, and the live path was too slow for kids.
+
+- Device1.Connect only when the object is advertising (RSSI) or already
+  Connected. Silent / missing objects wait for a fresh advertisement
+  (2 s on Realtek / MediaTek / QCA / Broadcom, 800 ms otherwise) and
+  classify as `not-advertising` / `pruned` instead of burning
+  `CONNECT_TIMEOUT_S`. The wait overlaps the host-abort pause.
+- Live Connect is 8 s (`CONNECT_TIMEOUT_S` stays 12). Scan settle is
+  350 ms. Close is 2 s + 2 s + 400 ms. A live cache hit no longer falls
+  through to an 8 s rescan. Worst-case BLE setup stays under a minute;
+  a typical short print should land around 20 s plus head time.
+- Install-time udev `61-catprinter-btusb.rules`: `power/control=on` on
+  Wireless Controller *interfaces* (`e0/01/01`), Broadcom vendor-specific
+  `ff/01/01`, and their parent (combo IAD cards are `bDeviceClass=ef`).
+  Daemon still never writes udev, sysfs, `main.conf`, or rfkill.
+- `catprinterd check` prints `udev present|absent`.
+- Host chip classification follows `btusb` quirk tables across OEM remaps
+  (Foxconn 0489, Azurewave 13d3, Lite-On 04ca, ASUS 0b05, Toshiba 0930)
+  and adds Broadcom (`0a5c` / Apple / Dell). Shared OEM VIDs map by PID,
+  never VID-wide.
+
 ## 0.2.3 — 2026-08-17
 
 Production: combo-card USB firmware (btusb Realtek/QCA/MediaTek) was going

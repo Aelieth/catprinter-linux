@@ -1,0 +1,17 @@
+# Keep USB Bluetooth controllers awake. Combo Wi-Fi/BT cards (RTL8822CE, MT7925, …)
+# are IAD composites: the parent is bDeviceClass=ef and the Bluetooth function lives
+# on Wireless Controller interfaces (e0/01/01). Matching only bDeviceClass=e0 misses
+# those parents and leaves power/control=auto — btusb then autosuspends while LE
+# Connect is still pending.
+#
+# Broadcom OEM remaps (Azurewave/Lite-On/ASUS/Dell/Apple) bind as vendor-specific
+# 0xff/0x01/0x01 (btusb_table BCM_PATCHRAM), not e0/01/01.
+#
+# Install-time only (kit → /etc/udev/rules.d, image → /usr/lib/udev/rules.d).
+# catprinterd itself never writes udev, sysfs, main.conf, or rfkill.
+
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="e0", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="01", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="e0", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="01", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="01", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="01", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="e0", ATTR{bDeviceSubClass}=="01", ATTR{bDeviceProtocol}=="01", TEST=="power/control", ATTR{power/control}="on"

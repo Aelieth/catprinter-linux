@@ -87,7 +87,7 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 | Cat printer not found for N min — job stopped | The wait window expired; turn the printer on and print again. |
 | Print would be N m long; limit … | Split the document or pick a shorter page size. |
 | Two Cat Printers in the dialog | `sudo ./install.sh update` (re-aligns the DNS-SD uuid), or `CATPRINTER_DNSSD=off`. |
-| Nothing prints, queue idle | `sudo ./install.sh status`; `journalctl -u catprinter -n 50`; `catprinterd check` (TemporaryTimeout, combo, bt chip, USB BT power/control). |
+| Nothing prints, queue idle | `sudo ./install.sh status`; `journalctl -u catprinter -n 50`; `catprinterd check` (TemporaryTimeout, combo, bt chip, USB BT power/control, udev). |
 | Job stuck | `cancel -a CatPrinter`; `sudo systemctl restart catprinter`. |
 
 ## Image-baked install (custom uBlue image)
@@ -102,6 +102,7 @@ every rebase (`make image-files DEST=…` produces this layout from a checkout):
 /etc/systemd/system/multi-user.target.wants/catprinter.service        -> /usr/lib/systemd/system/…
 /etc/systemd/system/multi-user.target.wants/catprinter-queue.service  -> /usr/lib/systemd/system/…
 /usr/lib/systemd/system-preset/80-catprinter.preset  (enable both units — first boot only)
+/usr/lib/udev/rules.d/61-catprinter-btusb.rules       (USB BT autosuspend off on e0/01/01)
 /usr/lib/catprinter/env.example                      (docs; config stays in /etc/catprinter/env)
 /usr/lib/catprinter/install.sh                       (status / env / re-enable on the machine)
 /usr/lib/catprinter/VERSION                          ("<semver> <git-sha> <build-utc>")
@@ -132,7 +133,7 @@ systemd containers (see the repository README).
 ## Files
 
 `catprinterd` · `install.sh` · `catprinter.service` · `catprinter-queue.service` ·
-`80-catprinter.preset` · `env.example` · `VERSION` · this README.
+`80-catprinter.preset` · `61-catprinter-btusb.rules` · `env.example` · `VERSION` · this README.
 
 `VERSION` is one line, three fields: `<semver> <git-sha|nogit> <build-utc>` — the same line
 verbatim in the kit, in `/usr/local/share/catprinter/VERSION` (kit install) and in

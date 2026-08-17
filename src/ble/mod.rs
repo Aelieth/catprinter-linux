@@ -170,9 +170,13 @@ impl BlePrinter {
                 percent: 0,
                 message: "Connecting".into(),
             });
-            // Settings-held (Connected) → full retries; merely advertising → one quick try, then scan.
-            let attempts = if was_connected { CONNECT_ATTEMPTS } else { 1 };
-            match self.connect_to(conn, best, was_connected, attempts).await {
+            // Live cache (RSSI or Connected): full retries. We no longer Connect
+            // on a silent cache, so a failed advertising connect is not "maybe
+            // stale — scan 8 s"; scanning the same printer just burns the kid clock.
+            match self
+                .connect_to(conn, best, was_connected, CONNECT_ATTEMPTS)
+                .await
+            {
                 Ok(s) => return Ok(s),
                 Err(PrintError::NotCatPrinter(why)) if hint.is_none() => {
                     tracing::warn!(
@@ -181,8 +185,7 @@ impl BlePrinter {
                     );
                     note_not_cat_printer(&best.address);
                 }
-                Err(e) if was_connected => return Err(e),
-                Err(e) => tracing::info!("cached printer did not answer ({e}); scanning"),
+                Err(e) => return Err(e),
             }
         }
 

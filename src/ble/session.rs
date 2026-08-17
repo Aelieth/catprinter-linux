@@ -15,15 +15,17 @@ use crate::ble::seqpacket::SeqPacket;
 use crate::config::NotifyMode;
 use crate::models::{self, Caps, Family};
 use crate::printer::PrintError;
-use crate::protocol::mxw01::CONNECT_TIMEOUT_S;
+use crate::protocol::mxw01::{CONNECT_ATTEMPTS, LIVE_CONNECT_TIMEOUT_S};
 use crate::protocol::{CONTROL_UUID, DATA_UUID, NOTIFY_UUID, SERVICE_UUIDS};
 
-const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_secs(10);
-const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(1200);
-const HOST_ABORT_PAUSE: Duration = Duration::from_millis(2500);
-const PRUNE_PAUSE: Duration = Duration::from_millis(800);
-const ADAPTER_OFF_PAUSE: Duration = Duration::from_millis(3500);
-const POST_DISCONNECT_SLEEP: Duration = Duration::from_millis(800);
+const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_secs(6);
+const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(600);
+const HOST_ABORT_PAUSE: Duration = Duration::from_millis(2000);
+const PRUNE_PAUSE: Duration = Duration::from_millis(400);
+const ADAPTER_OFF_PAUSE: Duration = Duration::from_millis(3000);
+/// stop_notify + Disconnect: 5 s each made close() longer than the print.
+const CLOSE_CALL: Duration = Duration::from_secs(2);
+const POST_DISCONNECT_SLEEP: Duration = Duration::from_millis(400);
 /// Cheap toys drop notifications if the buffer is tiny; 256 is plenty for our command traffic.
 const NOTIFY_CHANNEL: usize = 256;
 
@@ -85,8 +87,8 @@ impl Session {
     }
 
     /// Connect to a discovered candidate and bind everything. `forced` overrides model detection.
-    /// `attempts`: 3 for a device that is advertising (scan) or Settings-held (Connected), 1 for a
-    /// merely-cached entry that may be stale (each timeout costs CONNECT_TIMEOUT_S).
+    /// `attempts`: 3 when the device is advertising or Settings-held. Silent cache entries are
+    /// never Connected (they wait for an advert instead of a 12 s page).
     ///
     /// Every attempt re-resolves a live Device1 path by address. Discovery-time paths are never
     /// reused after TemporaryTimeout may have deleted the object.
@@ -106,46 +108,69 @@ impl Session {
             .ok_or_else(|| PrintError::Bus("malformed device path".into()))?
             .to_string();
 
+        let advert_wait =
+            crate::ble::host::advert_wait_for(crate::ble::host::collect_default().chip);
+
         let mut last = String::new();
         let mut last_rssi = target.rssi;
+        let mut ready_budget = advert_wait;
+        let mut connect_floor = Duration::ZERO;
 
         for attempt in 1..=attempts {
-            let live =
-                match bluez::resolve_device_path(conn, &adapter_path, &target.address).await? {
-                    Some(d) => d,
-                    None => {
-                        let kind = ConnectFailureKind::Pruned;
-                        last = kind.format_last("device object gone");
-                        let expected = bluez::device_path_for(&adapter_path, &target.address);
-                        log_connect_fail(
-                            target,
-                            last_rssi,
-                            attempt,
-                            attempts,
-                            &expected,
-                            kind,
+            // TemporaryTimeout=0 leaves unpaired Device1 objects forever. Connecting
+            // while RSSI is unset pages until CONNECT_TIMEOUT_S — the dominant miss
+            // on RTL8822CE / MT7925 combo cards. Wait for a live advert or a held ACL.
+            // After a failed Connect the kind-specific pause overlaps this wait so
+            // host-abort + advert is 2 s, not 2.5 + 5.
+            let wait_started = tokio::time::Instant::now();
+            let live = match bluez::wait_until_ready_to_connect(
+                conn,
+                &adapter_path,
+                &target.address,
+                ready_budget.max(connect_floor),
+            )
+            .await?
+            {
+                Some(d) if bluez::connect_readiness(Some(&d)) == bluez::ConnectReadiness::Ready => {
+                    d
+                }
+                maybe => {
+                    let (kind, detail, path) = match &maybe {
+                        Some(d) => (
+                            ConnectFailureKind::NotAdvertising,
+                            "Device1 exists but is not advertising",
+                            d.path.clone(),
+                        ),
+                        None => (
+                            ConnectFailureKind::Pruned,
                             "device object gone",
-                        );
-                        match connect_next_action(kind, attempt, attempts) {
-                            ConnectNext::Retry {
-                                pause,
-                                ensure_discovery,
-                                recover_adapter,
-                            } => {
-                                tokio::time::sleep(pause).await;
-                                if recover_adapter {
-                                    let _ = bluez::recover_adapter(conn, &adapter_path).await;
-                                }
-                                if ensure_discovery {
-                                    discovery::ensure_le_discovery(conn, &adapter_path).await;
-                                }
-                                continue;
-                            }
-                            ConnectNext::GiveUp => break,
-                            ConnectNext::FailAdapterOff => return Err(PrintError::AdapterOff),
+                            bluez::device_path_for(&adapter_path, &target.address),
+                        ),
+                    };
+                    last = kind.format_last(detail);
+                    log_connect_fail(target, last_rssi, attempt, attempts, &path, kind, detail);
+                    match apply_connect_next(
+                        conn,
+                        &adapter_path,
+                        connect_next_action(kind, attempt, attempts),
+                    )
+                    .await
+                    {
+                        Ok(Some(pause)) => {
+                            ready_budget = retry_ready_budget(pause, advert_wait);
+                            connect_floor = pause;
+                            continue;
                         }
+                        Ok(None) => break,
+                        Err(e) => return Err(e),
                     }
-                };
+                }
+            };
+
+            let leftover = leftover_floor(wait_started.elapsed(), connect_floor);
+            if !leftover.is_zero() {
+                tokio::time::sleep(leftover).await;
+            }
 
             last_rssi = live.rssi.or(target.rssi);
             tracing::info!(
@@ -199,22 +224,19 @@ impl Session {
                     guard.armed = false;
                     drop(dev);
                     drop(guard);
-                    match connect_next_action(one.kind, attempt, attempts) {
-                        ConnectNext::FailAdapterOff => return Err(PrintError::AdapterOff),
-                        ConnectNext::GiveUp => {}
-                        ConnectNext::Retry {
-                            pause,
-                            ensure_discovery,
-                            recover_adapter,
-                        } => {
-                            tokio::time::sleep(pause).await;
-                            if recover_adapter {
-                                let _ = bluez::recover_adapter(conn, &adapter_path).await;
-                            }
-                            if ensure_discovery {
-                                discovery::ensure_le_discovery(conn, &adapter_path).await;
-                            }
+                    match apply_connect_next(
+                        conn,
+                        &adapter_path,
+                        connect_next_action(one.kind, attempt, attempts),
+                    )
+                    .await
+                    {
+                        Ok(Some(pause)) => {
+                            ready_budget = retry_ready_budget(pause, advert_wait);
+                            connect_floor = pause;
                         }
+                        Ok(None) => break,
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -382,15 +404,15 @@ impl Session {
     }
 
     /// Disconnect and release the device. Idempotent; always attempted. Bounded: two
-    /// CALL_TIMEOUTs plus POST_DISCONNECT_SLEEP (≈ 5 + 5 + 0.8 s worst case).
+    /// CLOSE_CALLs plus POST_DISCONNECT_SLEEP (≈ 2 + 2 + 0.4 s worst case).
     pub async fn close(mut self) {
-        let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, self.notify_chr.stop_notify()).await;
+        let _ = tokio::time::timeout(CLOSE_CALL, self.notify_chr.stop_notify()).await;
         // Drop the acquired fd before disconnecting so BlueZ releases the channel.
         self.data = DataPath::WriteValue {
             chr: self.control.clone(),
             mtu: 23,
         };
-        let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, self.dev.disconnect()).await;
+        let _ = tokio::time::timeout(CLOSE_CALL, self.dev.disconnect()).await;
         // Only mark closed once the Disconnect call has actually returned: if this future is
         // dropped mid-close, the Drop fallback below still releases the link.
         self.closed = true;
@@ -441,13 +463,39 @@ impl Drop for ConnectGuard {
     }
 }
 
+/// Overlap the kind-specific pause with the advert wait so host-abort + RSSI
+/// is one window, not pause-then-wait.
+pub(crate) fn retry_ready_budget(pause: Duration, advert: Duration) -> Duration {
+    pause.max(advert)
+}
+
+/// If `wait_until_ready_to_connect` returned early, still honour `floor`
+/// (BlueZ's ~2 s disconnect timer after host-abort).
+pub(crate) fn leftover_floor(elapsed: Duration, floor: Duration) -> Duration {
+    floor.saturating_sub(elapsed)
+}
+
+/// Worst-case wall time for one `Session::connect` + GATT bind + `close` when the
+/// printer is advertising or Settings-held. Excludes thermal-head AA wait.
+/// Must stay slightly over a minute at most so kids are not parked in BLE retries.
+pub fn live_job_setup_ceiling() -> Duration {
+    let combo = crate::ble::host::advert_wait_for(crate::ble::host::ChipFamily::Realtek);
+    let retry = retry_ready_budget(HOST_ABORT_PAUSE, combo);
+    Duration::from_secs(LIVE_CONNECT_TIMEOUT_S) * u32::from(CONNECT_ATTEMPTS)
+        + retry * u32::from(CONNECT_ATTEMPTS.saturating_sub(1))
+        + SERVICES_RESOLVED_TIMEOUT
+        + CLOSE_CALL
+        + CLOSE_CALL
+        + POST_DISCONNECT_SLEEP
+}
+
 /// Inter-attempt pause: host-abort (autosuspend/coex) waits longer; prune is short + re-resolve.
 /// Adapter-off waits longest so USB reset / firmware reload can finish.
 pub(crate) fn pause_after_failure(kind: ConnectFailureKind) -> Duration {
     match kind {
         ConnectFailureKind::AdapterOff => ADAPTER_OFF_PAUSE,
         ConnectFailureKind::HostAbort => HOST_ABORT_PAUSE,
-        ConnectFailureKind::Pruned => PRUNE_PAUSE,
+        ConnectFailureKind::Pruned | ConnectFailureKind::NotAdvertising => PRUNE_PAUSE,
         _ => CONNECT_RETRY_PAUSE,
     }
 }
@@ -487,9 +535,37 @@ pub(crate) fn connect_next_action(
         pause: pause_after_failure(kind),
         ensure_discovery: matches!(
             kind,
-            ConnectFailureKind::Pruned | ConnectFailureKind::HostAbort
+            ConnectFailureKind::Pruned
+                | ConnectFailureKind::HostAbort
+                | ConnectFailureKind::NotAdvertising
         ),
         recover_adapter: kind == ConnectFailureKind::AdapterOff,
+    }
+}
+
+/// `Ok(Some(pause))` = try again after overlapping that pause with the advert
+/// wait; `Ok(None)` = last attempt used up; `Err` = terminal.
+async fn apply_connect_next(
+    conn: &Connection,
+    adapter_path: &str,
+    next: ConnectNext,
+) -> Result<Option<Duration>, PrintError> {
+    match next {
+        ConnectNext::FailAdapterOff => Err(PrintError::AdapterOff),
+        ConnectNext::GiveUp => Ok(None),
+        ConnectNext::Retry {
+            pause,
+            ensure_discovery,
+            recover_adapter,
+        } => {
+            if recover_adapter {
+                let _ = bluez::recover_adapter(conn, adapter_path).await;
+            }
+            if ensure_discovery {
+                discovery::ensure_le_discovery(conn, adapter_path).await;
+            }
+            Ok(Some(pause))
+        }
     }
 }
 
@@ -532,11 +608,11 @@ fn log_connect_fail(
 }
 
 async fn try_one_connect(dev: &Device1Proxy<'static>) -> Result<(), OneConnect> {
-    match tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_S), dev.connect()).await {
+    match tokio::time::timeout(Duration::from_secs(LIVE_CONNECT_TIMEOUT_S), dev.connect()).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) if bluez::is_error_named(&e, "org.bluez.Error.AlreadyConnected") => Ok(()),
         Ok(Err(e)) if bluez::is_error_named(&e, "org.bluez.Error.InProgress") => {
-            wait_connected(dev, Duration::from_secs(CONNECT_TIMEOUT_S)).await
+            wait_connected(dev, Duration::from_secs(LIVE_CONNECT_TIMEOUT_S)).await
         }
         Ok(Err(e)) => Err(OneConnect {
             kind: bluez::classify_connect_error(&e),
@@ -544,7 +620,7 @@ async fn try_one_connect(dev: &Device1Proxy<'static>) -> Result<(), OneConnect> 
         }),
         Err(_) => {
             // Cancel a hung in-flight connect.
-            let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.disconnect()).await;
+            let _ = tokio::time::timeout(CLOSE_CALL, dev.disconnect()).await;
             Err(OneConnect {
                 kind: ConnectFailureKind::Timeout,
                 detail: "timed out".into(),
@@ -977,6 +1053,90 @@ mod tests {
                 ensure_discovery: false,
                 recover_adapter: false,
             }
+        );
+        assert_eq!(
+            connect_next_action(ConnectFailureKind::NotAdvertising, 1, 3),
+            ConnectNext::Retry {
+                pause: PRUNE_PAUSE,
+                ensure_discovery: true,
+                recover_adapter: false,
+            }
+        );
+        assert_eq!(
+            connect_next_action(ConnectFailureKind::NotAdvertising, 3, 3),
+            ConnectNext::GiveUp
+        );
+        assert_eq!(
+            pause_after_failure(ConnectFailureKind::NotAdvertising),
+            PRUNE_PAUSE
+        );
+    }
+
+    #[test]
+    fn leftover_floor_honours_host_abort_even_if_rssi_is_already_set() {
+        assert_eq!(
+            leftover_floor(Duration::from_millis(0), HOST_ABORT_PAUSE),
+            HOST_ABORT_PAUSE
+        );
+        assert_eq!(
+            leftover_floor(HOST_ABORT_PAUSE, HOST_ABORT_PAUSE),
+            Duration::ZERO
+        );
+        assert_eq!(
+            leftover_floor(
+                HOST_ABORT_PAUSE + Duration::from_millis(50),
+                HOST_ABORT_PAUSE
+            ),
+            Duration::ZERO
+        );
+        let advert = crate::ble::host::advert_wait_for(crate::ble::host::ChipFamily::Realtek);
+        assert_eq!(
+            retry_ready_budget(HOST_ABORT_PAUSE, advert),
+            HOST_ABORT_PAUSE.max(advert)
+        );
+        assert!(
+            retry_ready_budget(HOST_ABORT_PAUSE, advert) < Duration::from_secs(5),
+            "pause+advert must overlap, not stack to 7+ s"
+        );
+    }
+
+    #[test]
+    fn live_setup_ceiling_stays_under_a_minute() {
+        let ceiling = live_job_setup_ceiling();
+        assert!(
+            ceiling <= Duration::from_secs(60),
+            "live printer setup {ceiling:?} must not exceed a minute (plus head time)"
+        );
+        assert!(
+            Duration::from_secs(LIVE_CONNECT_TIMEOUT_S)
+                < Duration::from_secs(crate::protocol::mxw01::CONNECT_TIMEOUT_S)
+        );
+        // 3 × 8 s live Connect is the bulk; stacked 12 s pages + 5 s adverts would miss this.
+        assert!(
+            Duration::from_secs(LIVE_CONNECT_TIMEOUT_S) * u32::from(CONNECT_ATTEMPTS)
+                + HOST_ABORT_PAUSE * 2
+                < Duration::from_secs(35)
+        );
+        let src = include_str!("session.rs");
+        assert!(
+            src.contains("LIVE_CONNECT_TIMEOUT_S"),
+            "try_one_connect must use the live timeout, not only mention it"
+        );
+        assert!(
+            src.contains("leftover_floor"),
+            "connect loop must honour leftover_floor"
+        );
+        let open = include_str!("mod.rs");
+        let start = open.find("async fn open(").expect("open");
+        let end = open.find("pub async fn print(").expect("print");
+        let block = &open[start..end];
+        assert!(
+            !block.contains("cached printer did not answer"),
+            "live cache must not fall through to an 8 s scan after ConnectFailed"
+        );
+        assert!(
+            block.contains("CONNECT_ATTEMPTS"),
+            "advertising cache uses the full attempt budget"
         );
     }
 

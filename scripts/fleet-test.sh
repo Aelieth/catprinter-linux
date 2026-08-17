@@ -152,8 +152,10 @@ check_daemon_and_queue() {  # $1 = label, $2 = expected FragmentPath dir (/usr/l
 }
 
 # ---- inputs -------------------------------------------------------------------------------------
-for f in "$KIT/catprinterd" "$KIT/install.sh" "$KIT/VERSION" "$KIT/catprinter.service" "$IMAGE_ROOT/usr/bin/catprinterd" \
-         "$IMAGE_ROOT/usr/lib/systemd/system/catprinter.service" "$IMAGE_ROOT/usr/lib/catprinter/install.sh"; do
+for f in "$KIT/catprinterd" "$KIT/install.sh" "$KIT/VERSION" "$KIT/catprinter.service" \
+         "$KIT/61-catprinter-btusb.rules" "$IMAGE_ROOT/usr/bin/catprinterd" \
+         "$IMAGE_ROOT/usr/lib/systemd/system/catprinter.service" "$IMAGE_ROOT/usr/lib/catprinter/install.sh" \
+         "$IMAGE_ROOT/usr/lib/udev/rules.d/61-catprinter-btusb.rules"; do
   [[ -e $f ]] || die "missing $f — run: make kit image-files"
 done
 [[ -x $KIT/catprinterd && -x $KIT/install.sh && -x $IMAGE_ROOT/usr/bin/catprinterd && -x $IMAGE_ROOT/usr/lib/catprinter/install.sh ]] || die "kit/image binaries or install.sh not executable (chmod 0755)"
@@ -263,7 +265,8 @@ else
   assert "/usr/local/bin/catprinterd installed" x test -x /usr/local/bin/catprinterd
   for f in /etc/systemd/system/catprinter.service /etc/systemd/system/catprinter-queue.service \
            /usr/local/share/catprinter/VERSION /usr/local/share/catprinter/INSTALLED /usr/local/share/catprinter/catprinter.service \
-           /usr/local/share/catprinter/catprinter-queue.service /usr/local/share/catprinter/80-catprinter.preset; do
+           /usr/local/share/catprinter/catprinter-queue.service /usr/local/share/catprinter/80-catprinter.preset \
+           /etc/udev/rules.d/61-catprinter-btusb.rules; do
     assert "$f exists" x test -f "$f"
   done
   assert_eq "catprinter is-enabled (kit)" "$(out1 'systemctl is-enabled catprinter.service')" enabled
