@@ -27,7 +27,7 @@ impl Default for JobOptions {
     fn default() -> Self {
         JobOptions {
             print_quality: 4,
-            color_mode: "monochrome".into(),
+            color_mode: "bi-level".into(),
             content_optimize: "auto".into(),
             copies: 1,
             media: None,
@@ -52,7 +52,7 @@ impl JobOptions {
             .unwrap_or(4);
         let color_mode = req
             .get_str(g, "print-color-mode")
-            .unwrap_or_else(|| "monochrome".into());
+            .unwrap_or_else(|| "bi-level".into());
         let content_optimize = req
             .get_str(g, "print-content-optimize")
             .unwrap_or_else(|| "auto".into());
@@ -117,32 +117,35 @@ impl JobOptions {
     /// Render options for this job. `is_image` = a JPEG/PNG passthrough (always tape layout).
     pub fn render_options(&self, base: &RenderOptions, is_image: bool) -> RenderOptions {
         let mut o = base.clone();
-        // print-quality → preset (+ tone High = grayscale)
-        let (mut preset, mut tone) = match self.print_quality {
-            3 => (Preset::Text, Tone::BlackWhite),
-            5 => (Preset::Picture, Tone::Grayscale),
-            _ => (Preset::Default, Tone::BlackWhite),
+        // print-quality is style only. Tone is print-color-mode (orthogonal).
+        let mut preset = match self.print_quality {
+            3 => Preset::Text,
+            5 => Preset::Picture,
+            _ => Preset::Default,
         };
-        // print-content-optimize only nudges the default quality
         if self.print_quality == 4 {
             match self.content_optimize.as_str() {
-                "photo" => {
-                    preset = Preset::Picture;
-                    tone = Tone::Grayscale;
-                }
+                "photo" | "graphic" | "graphics" => preset = Preset::Picture,
                 "text" => preset = Preset::Text,
                 _ => {}
             }
         }
-        if self.color_mode == "bi-level" || self.color_mode == "process-bi-level" {
-            tone = Tone::BlackWhite;
+        let tone = match self.color_mode.as_str() {
+            "monochrome" => Tone::Grayscale,
+            _ => Tone::BlackWhite, // bi-level, process-bi-level, auto, …
+        };
+        let sheet = !is_image && self.is_sheet_media();
+        // Homework on A4/Letter: Document preset (no trim, threshold, 0x68).
+        if sheet {
+            preset = Preset::Document;
         }
         o.preset = preset;
         o.tone = tone;
         o.layout = if is_image {
             Layout::Tape
+        } else if sheet {
+            Layout::Sheet
         } else {
-            // the raster geometry decides (Layout::Auto); the media hint is only a fallback for odd rasters
             Layout::Auto
         };
         o
@@ -214,20 +217,33 @@ mod tests {
         assert_eq!((ro.preset, ro.tone), (Preset::Text, Tone::BlackWhite));
         let o = JobOptions::from_request(&req_with(vec![("print-quality", v_enum(5))]), 10);
         let ro = o.render_options(&base, false);
-        assert_eq!((ro.preset, ro.tone), (Preset::Picture, Tone::Grayscale));
+        assert_eq!(
+            (ro.preset, ro.tone),
+            (Preset::Picture, Tone::BlackWhite),
+            "Picture must not force grayscale"
+        );
         let o = JobOptions::from_request(
             &req_with(vec![
                 ("print-quality", v_enum(5)),
-                ("print-color-mode", v_kw("bi-level")),
+                ("print-color-mode", v_kw("monochrome")),
             ]),
             10,
         );
-        assert_eq!(o.render_options(&base, false).tone, Tone::BlackWhite);
+        assert_eq!(
+            o.render_options(&base, false).tone,
+            Tone::Grayscale,
+            "monochrome is the grayscale tone"
+        );
         let o = JobOptions::from_request(
             &req_with(vec![("print-content-optimize", v_kw("photo"))]),
             10,
         );
         assert_eq!(o.render_options(&base, false).preset, Preset::Picture);
+        assert_eq!(
+            o.render_options(&base, false).tone,
+            Tone::BlackWhite,
+            "photo optimize is style only"
+        );
         let o = JobOptions::from_request(
             &req_with(vec![
                 ("print-quality", v_enum(3)),
@@ -244,6 +260,49 @@ mod tests {
         assert_eq!(o.render_options(&base, true).layout, Layout::Tape);
         assert_eq!(o.job_name, "Homework");
         assert_eq!(o.user, "kid");
+    }
+
+    #[test]
+    fn sheet_media_selects_document_preset() {
+        let base = RenderOptions::default();
+        let mc = Coll::new()
+            .add(
+                "media-size",
+                Coll::new()
+                    .add("x-dimension", v_int(21000))
+                    .add("y-dimension", v_int(29700))
+                    .build(),
+            )
+            .add("media-size-name", v_kw("iso_a4_210x297mm"))
+            .build();
+        let o = JobOptions::from_request(
+            &req_with(vec![("print-quality", v_enum(5)), ("media-col", mc)]),
+            10,
+        );
+        let ro = o.render_options(&base, false);
+        assert_eq!(ro.preset, Preset::Document);
+        assert_eq!(ro.layout, Layout::Sheet);
+        assert!(!ro.preset.trim());
+        // JPEG passthrough stays tape even if the job claimed A4.
+        let ro = o.render_options(&base, true);
+        assert_eq!(ro.layout, Layout::Tape);
+        assert_eq!(ro.preset, Preset::Picture);
+    }
+
+    #[test]
+    fn tape_text_can_still_be_grayscale() {
+        let base = RenderOptions::default();
+        let o = JobOptions::from_request(
+            &req_with(vec![
+                ("print-quality", v_enum(3)),
+                ("print-color-mode", v_kw("monochrome")),
+                ("media", v_kw("custom_cat-tape_48x297mm")),
+            ]),
+            10,
+        );
+        let ro = o.render_options(&base, false);
+        assert_eq!((ro.preset, ro.tone), (Preset::Text, Tone::Grayscale));
+        assert!(ro.preset.trim());
     }
 
     #[test]

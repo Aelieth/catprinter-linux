@@ -23,9 +23,9 @@ use crate::raster::GrayPage;
 pub enum Preset {
     /// FS dither, intensity 0x5D, trim, unsharp, curve 1.1/1.12, gray dither. IPP print-quality 4 (Normal).
     Default,
-    /// FS dither, intensity 0x78, trim, unsharp, curve 1.6/1.22, gray dither. IPP print-quality 5 (High).
+    /// FS dither, intensity 0x78, trim, unsharp, curve 1.6/1.22, gray dither. IPP print-quality 5 (Picture).
     Picture,
-    /// Threshold, intensity 0x68, trim, no unsharp, curve 2.4/1.35. IPP print-quality 3 (Draft).
+    /// Threshold, intensity 0x68, trim, no unsharp, curve 2.4/1.35. IPP print-quality 3 (Text).
     Text,
     /// Threshold, intensity 0x68, NO trim (whole sheet miniature), unsharp, curve 2.4/1.35.
     Document,

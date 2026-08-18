@@ -11,15 +11,11 @@ use crate::raster::{self, Limits};
 use crate::render::{self, Dither, Layout, Preset, RenderOptions, Tone};
 
 pub async fn run(args: PrintArgs) -> i32 {
-    let (preset, tone) = match args.quality.trim().to_ascii_lowercase().as_str() {
-        "draft" | "text" => (Preset::Text, Tone::BlackWhite),
-        "high" | "picture" | "photo" => (Preset::Picture, Tone::Grayscale),
-        _ => (Preset::Default, Tone::BlackWhite),
-    };
+    let preset = Preset::parse(&args.quality).unwrap_or(Preset::Default);
     let tone = if args.bi_level {
         Tone::BlackWhite
     } else {
-        tone
+        Tone::parse(&args.tone).unwrap_or(Tone::BlackWhite)
     };
 
     let bytes = match std::fs::read(&args.file) {
@@ -56,7 +52,7 @@ pub async fn run(args: PrintArgs) -> i32 {
     let opts = RenderOptions {
         preset,
         tone,
-        layout: if args.sheet {
+        layout: if args.sheet || preset == Preset::Document {
             Layout::Sheet
         } else if is_image {
             Layout::Tape

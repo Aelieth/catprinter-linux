@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.0.0 — 2026-08-17
+
+Print dialog matches the original kid settings ([original-settings.md](original-settings.md)).
+Style and tone are independent again: Picture no longer forces grayscale.
+Document A4/Letter selects the no-trim homework miniature. Paper / Sticker
+is a label only. Regenerating the CUPS queue (`install.sh update`) is
+required so the driverless PPD picks up the new names.
+
+Breaking: IPP `print-quality` 5 is Picture (1-bit unless color-mode is
+monochrome). `print-color-mode-default` is `bi-level` (Black and white).
+CLI `-q high` is an alias for Picture, not grayscale; use `--tone grayscale`.
+
 ## 0.2.6 — 2026-08-17
 
 Setup and lifecycle surface so an integrator does not reimplement BlueZ

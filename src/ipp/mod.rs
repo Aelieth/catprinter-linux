@@ -914,7 +914,11 @@ impl IppService {
             v_int(media::MARGIN_TOP_BOTTOM_HMM),
         );
         put("media-source-supported", Desc, v_kw(media::MEDIA_SOURCE));
-        put("media-type-supported", Desc, v_kw(media::MEDIA_TYPE));
+        put(
+            "media-type-supported",
+            Desc,
+            v_kws(&["stationery", "labels"]),
+        );
         put("media-size-supported", Desc, media::media_size_supported());
         put("media-ready", Desc, v_kw(media::TAPE.name));
         put(
@@ -975,11 +979,11 @@ impl IppService {
         put("output-bin-default", Tmpl, v_kw("face-up"));
         put("output-bin-supported", Tmpl, v_kw("face-up"));
         put("page-ranges-supported", Tmpl, v_bool(false));
-        put("print-color-mode-default", Tmpl, v_kw("monochrome"));
+        put("print-color-mode-default", Tmpl, v_kw("bi-level"));
         put(
             "print-color-mode-supported",
             Tmpl,
-            v_kws(&["monochrome", "bi-level"]),
+            v_kws(&["bi-level", "monochrome"]),
         );
         put("print-content-optimize-default", Tmpl, v_kw("auto"));
         put(

@@ -208,10 +208,13 @@ pub struct CheckArgs {
 pub struct PrintArgs {
     /// PNG, JPEG or PWG raster file.
     pub file: PathBuf,
-    /// Print quality: draft (sharp text), normal (dithered), high (photo / grayscale).
-    #[arg(short = 'q', long, default_value = "normal")]
+    /// Print style: default, picture, text, document (aliases: normal, high, draft, doc).
+    #[arg(short = 'q', long, default_value = "default")]
     pub quality: String,
-    /// Force 1-bit even at high quality.
+    /// Tone: blackwhite (1 bpp) or grayscale (16-level on MXW01). Independent of style.
+    #[arg(long, default_value = "blackwhite")]
+    pub tone: String,
+    /// Force 1-bit even if --tone grayscale.
     #[arg(long, default_value_t = false)]
     pub bi_level: bool,
     /// Treat pages as sheets (no trim, whole page shrunk) instead of tape.

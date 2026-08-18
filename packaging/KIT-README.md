@@ -75,11 +75,12 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 ## In the print dialog
 
 * Printer: **CatPrinter** (never the default — a 48 mm tape must not receive homework by accident).
-* **Media**: `48x297mm` (cat tape, default) · `48x500mm` (long tape) · `A4` / `Letter` (whole page
-  shrunk to the tape) · Custom (48 mm × up to 5000 mm). LibreOffice picks A4/Letter for office
-  documents by itself.
-* **Print Quality**: `Draft` = sharp text · `Normal` = drawings (dithered) · `High` = photos
-  (16-level grayscale on the MXW01).
+* **Media**: **Cat tape 48 mm** (default) · Cat tape long · **Document A4** / Document Letter
+  (whole homework page shrunk to the tape) · Custom (48 mm × up to 5000 mm).
+* **Print quality**: **Default** (drawings) · Text (sharp) · Picture (photos / crayon). Style only.
+* **Color / tone**: **Black and white** (default) · Grayscale (16-level on the MXW01). Picture +
+  Grayscale is the photo path.
+* **Paper type**: Paper · Sticker (label only; same burn).
 * Anything CUPS can print prints: PDF, text, PNG/JPEG, LibreOffice, browsers, n-up, copies.
   `.webp` is not a CUPS type — convert first.
 

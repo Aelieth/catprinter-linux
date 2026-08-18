@@ -29,19 +29,19 @@ pub const TAPE_LONG: MediaSize = MediaSize {
     name: "custom_cat-tape-long_48x500mm",
     x_hmm: 4800,
     y_hmm: 50000,
-    label: "Cat tape 48 mm, long",
+    label: "Cat tape long",
 };
 pub const A4: MediaSize = MediaSize {
     name: "iso_a4_210x297mm",
     x_hmm: 21000,
     y_hmm: 29700,
-    label: "A4 (shrunk to tape)",
+    label: "Document A4",
 };
 pub const LETTER: MediaSize = MediaSize {
     name: "na_letter_8.5x11in",
     x_hmm: 21590,
     y_hmm: 27940,
-    label: "Letter (shrunk to tape)",
+    label: "Document Letter",
 };
 
 pub const ALL: [MediaSize; 4] = [TAPE, TAPE_LONG, A4, LETTER];
@@ -173,10 +173,11 @@ pub fn strings_en() -> String {
         s.push_str(&format!("\"media.{}\" = \"{}\";\n", m.name, m.label));
     }
     s.push_str("\"media-source.main\" = \"Roll\";\n");
-    s.push_str("\"media-type.stationery\" = \"Thermal paper\";\n");
-    s.push_str("\"print-quality.3\" = \"Draft (sharp text)\";\n");
-    s.push_str("\"print-quality.4\" = \"Normal (drawings)\";\n");
-    s.push_str("\"print-quality.5\" = \"High (photos, grayscale)\";\n");
+    s.push_str("\"media-type.stationery\" = \"Paper\";\n");
+    s.push_str("\"media-type.labels\" = \"Sticker\";\n");
+    s.push_str("\"print-quality.3\" = \"Text\";\n");
+    s.push_str("\"print-quality.4\" = \"Default\";\n");
+    s.push_str("\"print-quality.5\" = \"Picture\";\n");
     s.push_str("\"print-color-mode.monochrome\" = \"Grayscale\";\n");
     s.push_str("\"print-color-mode.bi-level\" = \"Black and white\";\n");
     s
@@ -210,7 +211,13 @@ mod tests {
             IppValue::Array(v) => assert_eq!(v.len(), ALL.len() + 1),
             _ => panic!(),
         }
-        assert!(strings_en().contains("\"media.custom_cat-tape_48x297mm\" = \"Cat tape 48 mm\";"));
+        let s = strings_en();
+        assert!(s.contains("\"media.custom_cat-tape_48x297mm\" = \"Cat tape 48 mm\";"));
+        assert!(s.contains("\"media.iso_a4_210x297mm\" = \"Document A4\";"));
+        assert!(s.contains("\"print-quality.4\" = \"Default\";"));
+        assert!(s.contains("\"print-quality.5\" = \"Picture\";"));
+        assert!(s.contains("\"print-color-mode.bi-level\" = \"Black and white\";"));
+        assert!(s.contains("\"media-type.labels\" = \"Sticker\";"));
         assert!(MediaHint {
             x_hmm: 4800,
             y_hmm: 1,

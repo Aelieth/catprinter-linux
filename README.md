@@ -1,12 +1,12 @@
 ### Because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
 
-![It's Hack o' Clock!](media/hackoclock.jpg)
+![Catprinter nyan!](catprinter-with-nyancat.jpg)
 
 *Meet the star: a pocket-sized Bluetooth thermal cat that prints “It’s Hack o’ Clock” and whatever else a kid (or tired adult) desires — once Linux is taught how to talk to it properly.*
 
 You bought the cutest, cheapest little thermal printer on the internet. It has a face. It has ears. It costs less than lunch. And then you tried to use it on Linux.
 
-Bluetooth Low Energy + BlueZ + combo wireless cards that secretly dislike cats + an official phone app that hogs the single connection = a special kind of chaos. An entire program had to be written so this $12 device would behave like a normal printer.
+Bluetooth Low Energy + BlueZ + combo wireless cards that secretly dislike cats + an official phone app that hogs the single connection = a special kind of chaos. An entire program had to be written so this catty device would behave like a normal printer.
 
 **catprinterd** is that program: a small, hardened Rust daemon that turns an MXW01 (and the GB0x / GT01 / MX0x / YT01 / X5 / X6 family) into a driverless **IPP Everywhere** printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer. No PPD to install, no per-user setup, works for every account on the machine, and survives reboots without anyone logging in.
 
@@ -47,12 +47,16 @@ Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPR
 
 | Setting | Choices | What happens |
 |---|---|---|
-| Media / paper size | **48x297mm** (tape, default), 48x500mm, A4, Letter, Custom 48×(25–5000) mm | Tape sizes: white margins are trimmed and the content fills the 384-dot head. A4/Letter: the whole page is shrunk to the tape width (miniature). |
-| Print quality | **Normal** (drawings), Draft (sharp text), High (photos → 16-level grayscale on the MXW01) | selects dithering / grayscale / burn intensity |
+| Media / paper size | **Cat tape 48 mm** (default), Cat tape long, **Document A4**, Document Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Document A4/Letter: shrink the *whole* homework page (no trim). |
+| Print quality | **Default** (drawings), Text (sharp), Picture (photos / crayon) | style only — dither and heat. Does **not** pick grayscale. |
+| Color / tone | **Black and white** (default), Grayscale | 1-bit vs 16-level burn on the MXW01. Picture + Grayscale is the photo path. |
+| Paper type | **Paper**, Sticker | Label only. Same heat. |
 | Copies, n-up, landscape | as usual | CUPS handles them |
 
-Kids never need to touch these; the defaults print drawings and text nicely.  
+Kids: paint → Cat tape + Default. Photos → Picture + Grayscale. LibreOffice → **Document A4**.  
 Never make CatPrinter the *default* printer (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
+
+The old Python-era contract is in [original-settings.md](original-settings.md).
 
 ## Troubleshooting — When the cat is grumpy 😿
 
@@ -81,7 +85,7 @@ ipptool -V 2.0 -tI -f tests/fixtures/text-roll48.pwg -d filetype=image/pwg-raste
         ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/ipp-everywhere.test
 driverless ipp://127.0.0.1:8096/ipp/print      # the PPD CUPS would generate
 lpadmin -p CatTest -E -v ipp://127.0.0.1:8096/ipp/print -m everywhere && lp -d CatTest file.pdf
-cargo run -- print media/hackoclock.jpg -q high    # straight to the printer over BLE
+cargo run -- print media/hackoclock.jpg -q picture --tone grayscale    # straight to the printer over BLE
 cargo run -- print file.png --preview-only out.png # render only
 ```
 
@@ -93,5 +97,3 @@ cargo run -- print file.png --preview-only out.png # render only
 
 Made so kids can simply print.  
 Cat printer is ready. Linux is ready.  
-
-Meow.
