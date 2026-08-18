@@ -110,16 +110,57 @@ fn fixture(name: &str) -> String {
     format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// HTTP response body after the header block (the live /health JSON).
+fn http_body(resp: &str) -> &str {
+    resp.split("\r\n\r\n").nth(1).unwrap_or(resp)
+}
+
+#[test]
+fn shipped_binary_version_is_0_3_0() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
+    let out = Command::new(env!("CARGO_BIN_EXE_catprinterd"))
+        .arg("--version")
+        .output()
+        .expect("run catprinterd --version");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.trim(),
+        "catprinterd 0.3.0",
+        "stdout={text:?} stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn health_and_status_page() {
     let d = spawn_daemon(&[]);
     let body = ureq_get(d.port, "/health");
-    assert!(body.contains("\"version\""), "{body}");
-    assert!(body.contains("\"printer_state\": \"idle\""), "{body}");
+    let json = http_body(&body);
+    let v: serde_json::Value = serde_json::from_str(json)
+        .unwrap_or_else(|e| panic!("live /health is not JSON ({e}): {json}"));
+    assert_eq!(
+        v.get("version").and_then(|x| x.as_str()),
+        Some("0.3.0"),
+        "{json}"
+    );
+    assert_eq!(
+        v.get("printer_state").and_then(|x| x.as_str()),
+        Some("idle"),
+        "{json}"
+    );
     let page = ureq_get(d.port, "/");
     assert!(page.contains("Cat Printer"));
+    assert!(page.contains("catprinterd 0.3.0"), "{page}");
     let strings = ureq_get(d.port, "/strings/en.strings");
     assert!(strings.contains("Cat tape 48 mm"));
+    assert!(strings.contains("Document A4"));
+    assert!(strings.contains("\"print-quality.5\" = \"Picture\";"));
+    assert!(strings.contains("\"media-type.labels\" = \"Sticker\";"));
 }
 
 /// Minimal HTTP GET (no client crate needed).

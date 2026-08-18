@@ -306,6 +306,32 @@ mod tests {
     }
 
     #[test]
+    fn paper_sticker_is_label_only() {
+        let base = RenderOptions::default();
+        let paper = JobOptions::from_request(
+            &req_with(vec![
+                ("print-quality", v_enum(5)),
+                ("media-type", v_kw("stationery")),
+            ]),
+            10,
+        );
+        let sticker = JobOptions::from_request(
+            &req_with(vec![
+                ("print-quality", v_enum(5)),
+                ("media-type", v_kw("labels")),
+            ]),
+            10,
+        );
+        let rp = paper.render_options(&base, false);
+        let rs = sticker.render_options(&base, false);
+        assert_eq!(rp.preset, rs.preset);
+        assert_eq!(rp.tone, rs.tone);
+        assert_eq!(rp.layout, rs.layout);
+        assert_eq!(rp.preset, Preset::Picture);
+        assert_eq!(rp.tone, Tone::BlackWhite);
+    }
+
+    #[test]
     fn copies_and_media() {
         let o = JobOptions::from_request(&req_with(vec![("copies", v_int(50))]), 10);
         assert_eq!(o.copies, 10);

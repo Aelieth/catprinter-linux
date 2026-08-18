@@ -739,6 +739,11 @@ mod tests {
     fn preset_and_tone_aliases() {
         assert_eq!(Preset::parse("Picture"), Some(Preset::Picture));
         assert_eq!(Preset::parse("photo"), Some(Preset::Picture));
+        assert_eq!(
+            Preset::parse("high"),
+            Some(Preset::Picture),
+            "-q high is Picture, not grayscale"
+        );
         assert_eq!(Preset::parse("TEXT"), Some(Preset::Text));
         assert_eq!(Preset::parse("Document"), Some(Preset::Document));
         assert_eq!(Preset::parse("doc"), Some(Preset::Document));

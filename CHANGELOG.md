@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.3.0 — 2026-08-17
+## 0.3.0 — 2026-08-18
+
+Retracts the mistaken `v3.0.0` tag / GitHub Release (semver `3.0.0` is
+greater than `0.3.0`; `install.sh --download latest` and version-sorted
+clients would stay wrong). This is the same dialog-settings restore that
+was briefly published as 3.0.0, plus a small-footprint audit.
 
 Print dialog matches the original kid settings ([original-settings.md](original-settings.md)).
 Style and tone are independent again: Picture no longer forces grayscale.
@@ -11,6 +16,10 @@ required so the driverless PPD picks up the new names.
 Breaking: IPP `print-quality` 5 is Picture (1-bit unless color-mode is
 monochrome). `print-color-mode-default` is `bi-level` (Black and white).
 CLI `-q high` is an alias for Picture, not grayscale; use `--tone grayscale`.
+
+Audit: drop the unused `nix` crate, unused `uuid` v4, unused tokio `fs` /
+`process`, and unused tokio-util default features. No new runtime package
+and no extra ostree layer. Kit and image-baked layouts are unchanged.
 
 ## 0.2.6 — 2026-08-17
 

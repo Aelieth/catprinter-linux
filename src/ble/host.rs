@@ -883,4 +883,27 @@ ATTR{bDeviceClass}=="e0", ATTR{power/control}="on"
         let files = block.matches("packaging/").count();
         assert_eq!(files, 6, "KIT_FILES grew: {block}");
     }
+
+    #[test]
+    fn install_sh_usage_lists_lifecycle_commands() {
+        let help = std::process::Command::new("bash")
+            .args([
+                concat!(env!("CARGO_MANIFEST_DIR"), "/packaging/install.sh"),
+                "--help",
+            ])
+            .output()
+            .expect("install.sh --help");
+        assert!(help.status.success());
+        let text = String::from_utf8_lossy(&help.stdout);
+        for needle in [
+            "install",
+            "update",
+            "uninstall",
+            "status",
+            "--download",
+            "--binary",
+        ] {
+            assert!(text.contains(needle), "usage missing {needle}:\n{text}");
+        }
+    }
 }

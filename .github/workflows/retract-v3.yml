@@ -1,0 +1,36 @@
+name: Retract mistaken v3.0.0
+
+# One-shot: delete the GitHub Release and tags for the mistaken 3.0.0 cut
+# (semver 3.0.0 > 0.3.0; --download latest and version-sorted clients stay wrong).
+# Safe to re-run; missing release/tag is ignored.
+on:
+  workflow_dispatch:
+  # Also fire when this file lands, so we do not wait for a human dispatch.
+  push:
+    branches: ["catprinterd"]
+    paths: [".github/workflows/retract-v3.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  retract:
+    name: Delete v3.0.0 release and tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete GitHub Release v3.0.0 and leftover tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Prefer tag name; fall back to the known release id if the tag was already dropped.
+          gh release delete v3.0.0 --repo Aelieth/catprinter-linux --yes --cleanup-tag \
+            || gh api -X DELETE "repos/Aelieth/catprinter-linux/releases/372083078" \
+            || true
+          # --cleanup-tag removes refs/tags/v3.0.0; a bare 3.0.0 tag is a separate ref
+          gh api -X DELETE "repos/Aelieth/catprinter-linux/git/refs/tags/v3.0.0" || true
+          gh api -X DELETE "repos/Aelieth/catprinter-linux/git/refs/tags/3.0.0" || true
+          echo "remaining tags matching 3.0.0 / v3.0.0:"
+          gh api "repos/Aelieth/catprinter-linux/git/matching-refs/tags" --jq '.[].ref' | grep -E 'tags/(v)?3\.0\.0$' || echo "(none)"
+          echo "release v3.0.0:"
+          gh release view v3.0.0 --repo Aelieth/catprinter-linux || echo "(gone)"

@@ -37,6 +37,22 @@ jobs:
             *) echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo version $v"; exit 1 ;;
           esac
 
+      - name: Retract mistaken v3.0.0 if it is still published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 3.0.0 > 0.3.0; leaving that release makes --download latest / version-sorted clients wrong.
+          gh release delete v3.0.0 --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/3.0.0" || true
+
+      - name: Release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          awk '/^## 0.3.0 /{p=1; print; next} /^## /{if(p) exit} p' CHANGELOG.md > relnotes.md
+          test -s relnotes.md
+          cat relnotes.md
+
       # The `dist` artifact is the one the fleet test just booted — publish exactly those bytes.
       - uses: actions/download-artifact@v4
         with:
@@ -57,5 +73,6 @@ jobs:
           files: |
             dist/catprinter-kit-*.tar.gz
             dist/SHA256SUMS
+          body_path: relnotes.md
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
