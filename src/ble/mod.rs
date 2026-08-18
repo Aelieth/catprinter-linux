@@ -137,6 +137,14 @@ impl BlePrinter {
             Err(e) => return Err(e),
         };
 
+        // Always stop discovery when this open() ends. ensure_le_discovery on
+        // retry otherwise leaves Discovering=true with an empty queue.
+        let mut scan_guard = ScanGuard {
+            conn: conn.clone(),
+            path: adapter.path.clone(),
+            armed: true,
+        };
+
         progress(Progress {
             phase: Phase::Searching,
             percent: 0,
@@ -177,7 +185,11 @@ impl BlePrinter {
                 .connect_to(conn, best, was_connected, CONNECT_ATTEMPTS)
                 .await
             {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    scan_guard.armed = false;
+                    discovery::stop_scan(conn, &adapter.path).await;
+                    return Ok(s);
+                }
                 Err(PrintError::NotCatPrinter(why)) if hint.is_none() => {
                     tracing::warn!(
                         "{} connected but is not a cat printer ({why}); avoiding it for a while",
@@ -185,7 +197,11 @@ impl BlePrinter {
                     );
                     note_not_cat_printer(&best.address);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    scan_guard.armed = false;
+                    discovery::stop_scan(conn, &adapter.path).await;
+                    return Err(e);
+                }
             }
         }
 
@@ -196,11 +212,6 @@ impl BlePrinter {
             percent: 0,
             message: "Scanning for the cat printer".into(),
         });
-        let mut guard = ScanGuard {
-            conn: conn.clone(),
-            path: adapter.path.clone(),
-            armed: true,
-        };
         let mut result: Result<Session, PrintError> = Err(PrintError::NotFound);
         for _ in 0..=MISPICK_EXTRA_TRIES {
             let avoid = if hint.is_some() {
@@ -247,7 +258,7 @@ impl BlePrinter {
                 }
             }
         }
-        guard.armed = false;
+        scan_guard.armed = false;
         discovery::stop_scan(conn, &adapter.path).await;
         result
     }

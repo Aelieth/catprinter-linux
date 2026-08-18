@@ -27,6 +27,9 @@ pub trait Adapter1 {
     fn start_discovery(&self) -> zbus::Result<()>;
     fn stop_discovery(&self) -> zbus::Result<()>;
     fn set_discovery_filter(&self, filter: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
+    /// Experimental on BlueZ 5.87. Creates an LE-only Device1 when AddressType is set.
+    fn connect_device(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<OwnedObjectPath>;
+    fn remove_device(&self, device: &zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
     #[zbus(property)]
     fn powered(&self) -> zbus::Result<bool>;
     #[zbus(property)]
@@ -63,6 +66,10 @@ pub trait Device1 {
     fn adapter(&self) -> zbus::Result<OwnedObjectPath>;
     #[zbus(property)]
     fn paired(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn trusted(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_trusted(&self, value: bool) -> zbus::Result<()>;
 }
 
 #[zbus::proxy(interface = "org.bluez.GattService1", default_service = "org.bluez")]
@@ -661,6 +668,101 @@ pub fn classify_connect_name_message(name: Option<&str>, message: &str) -> Conne
     ConnectFailureKind::Other
 }
 
+/// What to do after `Adapter1.ConnectDevice` returns (including wall-clock timeout).
+///
+/// `Device1.Connect` is only allowed on a path **created** by ConnectDevice
+/// (`CreatedLe`). The discovery-scan object is dual-mode-looking and pages Classic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectDeviceOutcome {
+    /// ConnectDevice returned an object path — that object is LE-only.
+    CreatedLe,
+    NeedExperimental,
+    /// A Device1 already exists (usually the scan object). RemoveDevice, then ConnectDevice again.
+    Recreate,
+    /// Failed / timed out / AlreadyConnected: reuse only if Device1.Connected is already true.
+    ReuseIfConnected,
+    /// ConnectDevice is already running; wait for Connected, do not Device1.Connect.
+    WaitInProgress,
+    Error,
+}
+
+/// Classify a ConnectDevice result. `timed_out` is a local wall-clock timeout
+/// (no zbus error). `ok` is a returned object path.
+pub fn connect_device_outcome(
+    ok: bool,
+    name: Option<&str>,
+    message: &str,
+    timed_out: bool,
+) -> ConnectDeviceOutcome {
+    if ok && !timed_out {
+        return ConnectDeviceOutcome::CreatedLe;
+    }
+    if timed_out {
+        return ConnectDeviceOutcome::ReuseIfConnected;
+    }
+    let name = name.unwrap_or("");
+    if matches!(
+        name,
+        "org.freedesktop.DBus.Error.UnknownMethod"
+            | "org.freedesktop.DBus.Error.UnknownInterface"
+            | "org.bluez.Error.NotSupported"
+    ) {
+        return ConnectDeviceOutcome::NeedExperimental;
+    }
+    if name == "org.bluez.Error.AlreadyExists" {
+        return ConnectDeviceOutcome::Recreate;
+    }
+    if name == "org.bluez.Error.AlreadyConnected" {
+        return ConnectDeviceOutcome::ReuseIfConnected;
+    }
+    if name == "org.bluez.Error.InProgress" {
+        return ConnectDeviceOutcome::WaitInProgress;
+    }
+    if name.is_empty() && message.is_empty() {
+        return ConnectDeviceOutcome::Error;
+    }
+    // Failed / Timeout / other: still honour a Settings-held ACL if Connected.
+    ConnectDeviceOutcome::ReuseIfConnected
+}
+
+/// Address + AddressType for `Adapter1.ConnectDevice`. `public` forces an
+/// LE-only Device1; `Device1.Connect` on a dual-mode-looking object pages Classic.
+pub fn le_connect_device_pairs(address: &str) -> [(&'static str, String); 2] {
+    [
+        ("Address", address.to_string()),
+        ("AddressType", "public".into()),
+    ]
+}
+
+/// True when BlueZ hid `ConnectDevice` (Experimental = false on 5.87).
+pub fn is_connect_device_absent(e: &zbus::Error) -> bool {
+    matches!(
+        err_name(e).as_deref(),
+        Some("org.freedesktop.DBus.Error.UnknownMethod")
+            | Some("org.freedesktop.DBus.Error.UnknownInterface")
+            | Some("org.bluez.Error.NotSupported")
+    )
+}
+
+/// Property write that takes a temporary Device1 out of the discovery-stop sweep.
+pub fn trusted_write() -> (&'static str, bool) {
+    ("Trusted", true)
+}
+
+/// Write Trusted if BlueZ does not already report it.
+pub fn should_set_trusted(currently: Option<bool>) -> bool {
+    currently != Some(true)
+}
+
+/// Peer-refuse strings only — a generic timeout is not a phone app.
+pub fn peer_refused_connect(last: &str) -> bool {
+    let l = last.to_ascii_lowercase();
+    l.contains("refused")
+        || l.contains("rejected")
+        || l.contains("in use")
+        || (l.contains("busy") && !l.contains("adapter"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,6 +1056,69 @@ mod tests {
         assert_eq!(
             adapter_health_from_objects(&objs, "/org/bluez/hci0"),
             AdapterHealth::Powered
+        );
+    }
+
+    #[test]
+    fn le_connect_device_options_are_address_and_public_type() {
+        let pairs = le_connect_device_pairs("48:0F:57:17:06:9D");
+        assert_eq!(pairs[0], ("Address", "48:0F:57:17:06:9D".into()));
+        assert_eq!(pairs[1], ("AddressType", "public".into()));
+        assert_eq!(trusted_write(), ("Trusted", true));
+        assert!(should_set_trusted(None));
+        assert!(should_set_trusted(Some(false)));
+        assert!(!should_set_trusted(Some(true)));
+        assert!(!peer_refused_connect("timeout: timed out"));
+        assert!(!peer_refused_connect("pruned: device object gone"));
+        assert!(peer_refused_connect(
+            "br-connection-canceled, connection refused"
+        ));
+        assert!(peer_refused_connect("Rejected"));
+    }
+
+    #[test]
+    fn connect_device_outcome_never_pages_classic_on_scan_object() {
+        assert_eq!(
+            connect_device_outcome(true, None, "", false),
+            ConnectDeviceOutcome::CreatedLe
+        );
+        assert_eq!(
+            connect_device_outcome(
+                false,
+                Some("org.freedesktop.DBus.Error.UnknownMethod"),
+                "",
+                false
+            ),
+            ConnectDeviceOutcome::NeedExperimental
+        );
+        assert_eq!(
+            connect_device_outcome(false, Some("org.bluez.Error.AlreadyExists"), "", false),
+            ConnectDeviceOutcome::Recreate
+        );
+        assert_eq!(
+            connect_device_outcome(false, Some("org.bluez.Error.AlreadyConnected"), "", false),
+            ConnectDeviceOutcome::ReuseIfConnected
+        );
+        assert_eq!(
+            connect_device_outcome(false, Some("org.bluez.Error.InProgress"), "", false),
+            ConnectDeviceOutcome::WaitInProgress
+        );
+        assert_eq!(
+            connect_device_outcome(
+                false,
+                Some("org.bluez.Error.Failed"),
+                "Operation timed out",
+                false
+            ),
+            ConnectDeviceOutcome::ReuseIfConnected
+        );
+        assert_eq!(
+            connect_device_outcome(false, None, "", true),
+            ConnectDeviceOutcome::ReuseIfConnected
+        );
+        assert_ne!(
+            connect_device_outcome(false, Some("org.bluez.Error.AlreadyExists"), "", false),
+            ConnectDeviceOutcome::CreatedLe
         );
     }
 }

@@ -94,7 +94,7 @@ pub struct ServeArgs {
     #[arg(long, env = "CATPRINTER_PORT", default_value_t = 8095)]
     pub port: u16,
     /// Seconds a job keeps retrying to reach the printer before it is aborted.
-    #[arg(long, env = "CATPRINTER_PRINTER_WAIT", default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, env = "CATPRINTER_PRINTER_WAIT", default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     pub printer_wait: u64,
     /// Print every job to PNG files in DIR instead of Bluetooth (testing).
     #[arg(long, env = "CATPRINTER_FAKE_PRINTER")]
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(c.serve.port, 8095);
         assert_eq!(c.serve.max_copies, 10);
         assert_eq!(c.serve.max_document_mb, 64);
-        assert_eq!(c.serve.printer_wait, 600);
+        assert_eq!(c.serve.printer_wait, 120);
     }
 
     #[test]

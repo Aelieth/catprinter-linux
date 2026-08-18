@@ -22,7 +22,8 @@ After=bluetooth.service network.target
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 DynamicUser=yes
 User=catprinter
 # Default (empty) so systemd does not warn when the env file leaves it unset.

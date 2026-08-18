@@ -182,18 +182,17 @@ impl Session {
                 "connect attempt"
             );
 
-            let dev = bluez::device_proxy(conn, &live.path).await?;
-            let mut guard = ConnectGuard {
-                conn: conn.clone(),
-                path: live.path.clone(),
-                armed: true,
-            };
-
-            match try_one_connect(&dev).await {
-                Ok(()) => {
+            match try_le_connect(conn, &adapter_path, &target.address, &live.path).await {
+                Ok(path) => {
+                    let dev = bluez::device_proxy(conn, &path).await?;
+                    let mut guard = ConnectGuard {
+                        conn: conn.clone(),
+                        path: path.clone(),
+                        armed: true,
+                    };
                     let session = bind_session(
                         conn,
-                        &live.path,
+                        &path,
                         dev,
                         target,
                         forced,
@@ -205,7 +204,10 @@ impl Session {
                     guard.armed = false;
                     return Ok(session);
                 }
-                Err(one) => {
+                Err(LeConnectErr::NeedExperimental) => {
+                    return Err(PrintError::NeedExperimental);
+                }
+                Err(LeConnectErr::One(one)) => {
                     last = one.kind.format_last(&one.detail);
                     log_connect_fail(
                         target,
@@ -220,10 +222,7 @@ impl Session {
                     // (HCI_ERROR_LOCAL_HOST_TERM); a second Disconnect / StopDiscovery
                     // is what btusb_rtl_reset / btusb_qca_reset treat as cmd-timeout
                     // and USB-resets — adapter goes offline. Timeout already cancelled
-                    // once inside try_one_connect.
-                    guard.armed = false;
-                    drop(dev);
-                    drop(guard);
+                    // once inside try_le_connect.
                     match apply_connect_next(
                         conn,
                         &adapter_path,
@@ -242,20 +241,7 @@ impl Session {
             }
         }
 
-        let weak = last_rssi.is_some_and(|r| r < -80);
-        let mut hint = String::new();
-        if weak {
-            hint.push_str(" It is far away (weak Bluetooth) — move it next to the computer.");
-        }
-        if was_connected {
-            hint.push_str(
-                " Bluetooth Settings may be holding the printer; turn the printer off and on.",
-            );
-        } else {
-            hint.push_str(
-                " Close the phone app if it is open — the printer allows only one connection.",
-            );
-        }
+        let hint = connect_fail_hint(&last, last_rssi, was_connected);
         Err(PrintError::ConnectFailed {
             attempts,
             last,
@@ -475,9 +461,8 @@ pub(crate) fn leftover_floor(elapsed: Duration, floor: Duration) -> Duration {
     floor.saturating_sub(elapsed)
 }
 
-/// Worst-case wall time for one `Session::connect` + GATT bind + `close` when the
-/// printer is advertising or Settings-held. Excludes thermal-head AA wait.
-/// Must stay slightly over a minute at most so kids are not parked in BLE retries.
+/// Worst-case BLE setup for one `Session::connect` + GATT bind + `close`.
+/// Three 30 s LE attempts fit the 120 s printer-wait window.
 pub fn live_job_setup_ceiling() -> Duration {
     let combo = crate::ble::host::advert_wait_for(crate::ble::host::ChipFamily::Realtek);
     let retry = retry_ready_budget(HOST_ABORT_PAUSE, combo);
@@ -572,6 +557,193 @@ async fn apply_connect_next(
 struct OneConnect {
     kind: ConnectFailureKind,
     detail: String,
+}
+
+enum LeConnectErr {
+    NeedExperimental,
+    One(OneConnect),
+}
+
+/// Kid hint after the attempt budget is used up. The phone-app line is only
+/// for a peer refuse — same-host clients share BlueZ's link.
+pub(crate) fn connect_fail_hint(last: &str, rssi: Option<i16>, was_connected: bool) -> String {
+    let mut hint = String::new();
+    if rssi.is_some_and(|r| r < -80) {
+        hint.push_str(" It is far away (weak Bluetooth) — move it next to the computer.");
+    }
+    if was_connected {
+        hint.push_str(
+            " Bluetooth Settings may be holding the printer; turn the printer off and on.",
+        );
+    } else if bluez::peer_refused_connect(last) {
+        hint.push_str(
+            " Close the phone app if it is open — the printer allows only one connection.",
+        );
+    }
+    hint
+}
+
+async fn ensure_trusted(dev: &Device1Proxy<'static>) {
+    let now = match tokio::time::timeout(bluez::CALL_TIMEOUT, dev.trusted()).await {
+        Ok(Ok(v)) => Some(v),
+        _ => None,
+    };
+    if !bluez::should_set_trusted(now) {
+        return;
+    }
+    match tokio::time::timeout(bluez::CALL_TIMEOUT, dev.set_trusted(true)).await {
+        Ok(Ok(())) => tracing::info!("marked printer Trusted so BlueZ will not prune it"),
+        Ok(Err(e)) => tracing::debug!("set Trusted: {}", bluez::err_message(&e)),
+        Err(_) => tracing::debug!("set Trusted timed out"),
+    }
+}
+
+async fn device_if_connected(conn: &Connection, path: &str) -> Option<String> {
+    let dev = bluez::device_proxy(conn, path).await.ok()?;
+    match tokio::time::timeout(bluez::CALL_TIMEOUT, dev.connected()).await {
+        Ok(Ok(true)) => Some(path.to_string()),
+        _ => None,
+    }
+}
+
+async fn finish_le_object(
+    conn: &Connection,
+    path: &str,
+    allow_device_connect: bool,
+) -> Result<String, LeConnectErr> {
+    let dev = bluez::device_proxy(conn, path).await.map_err(|e| {
+        LeConnectErr::One(OneConnect {
+            kind: ConnectFailureKind::Other,
+            detail: e.to_string(),
+        })
+    })?;
+    ensure_trusted(&dev).await;
+    if let Ok(Ok(true)) = tokio::time::timeout(bluez::CALL_TIMEOUT, dev.connected()).await {
+        return Ok(path.to_string());
+    }
+    if !allow_device_connect {
+        return Err(LeConnectErr::One(OneConnect {
+            kind: ConnectFailureKind::Timeout,
+            detail: "ConnectDevice did not leave an LE link; not paging Classic".into(),
+        }));
+    }
+    match try_one_connect(&dev).await {
+        Ok(()) => Ok(path.to_string()),
+        Err(one) => Err(LeConnectErr::One(one)),
+    }
+}
+
+/// LE-only connect: `Adapter1.ConnectDevice(Address, AddressType=public)` so
+/// BlueZ does not page Classic on MXW01 ads that omit "BR/EDR Not Supported".
+/// `Device1.Connect` runs only against a path ConnectDevice just created.
+async fn try_le_connect(
+    conn: &Connection,
+    adapter_path: &str,
+    address: &str,
+    existing_path: &str,
+) -> Result<String, LeConnectErr> {
+    let ad = bluez::adapter_proxy(conn, adapter_path)
+        .await
+        .map_err(|e| {
+            LeConnectErr::One(OneConnect {
+                kind: ConnectFailureKind::Other,
+                detail: e.to_string(),
+            })
+        })?;
+
+    let mut last_err: Option<OneConnect> = None;
+    for attempt in 0..2 {
+        let pairs = bluez::le_connect_device_pairs(address);
+        let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
+        opts.insert(pairs[0].0, Value::from(pairs[0].1.as_str()));
+        opts.insert(pairs[1].0, Value::from(pairs[1].1.as_str()));
+        let call = tokio::time::timeout(
+            Duration::from_secs(LIVE_CONNECT_TIMEOUT_S),
+            ad.connect_device(opts),
+        )
+        .await;
+        let (ok, name, message, timed_out, created) = match &call {
+            Ok(Ok(p)) => (
+                true,
+                None,
+                String::new(),
+                false,
+                Some(p.as_str().to_string()),
+            ),
+            Ok(Err(e)) => (
+                false,
+                bluez::err_name(e),
+                bluez::err_message(e),
+                false,
+                None,
+            ),
+            Err(_) => (false, None, String::new(), true, None),
+        };
+        match bluez::connect_device_outcome(ok, name.as_deref(), &message, timed_out) {
+            bluez::ConnectDeviceOutcome::CreatedLe => {
+                let path = created.expect("CreatedLe has a path");
+                return finish_le_object(conn, &path, true).await;
+            }
+            bluez::ConnectDeviceOutcome::NeedExperimental => {
+                return Err(LeConnectErr::NeedExperimental);
+            }
+            bluez::ConnectDeviceOutcome::Recreate if attempt == 0 => {
+                if let Some(held) = device_if_connected(conn, existing_path).await {
+                    return finish_le_object(conn, &held, false).await;
+                }
+                if let Ok(p) = zbus::zvariant::ObjectPath::try_from(existing_path) {
+                    let _ = tokio::time::timeout(bluez::CALL_TIMEOUT, ad.remove_device(&p)).await;
+                }
+                tracing::info!(
+                    "removed dual-mode Device1 so ConnectDevice can create an LE object"
+                );
+                continue;
+            }
+            bluez::ConnectDeviceOutcome::ReuseIfConnected
+            | bluez::ConnectDeviceOutcome::WaitInProgress => {
+                if let Some(held) = device_if_connected(conn, existing_path).await {
+                    return finish_le_object(conn, &held, false).await;
+                }
+                if matches!(
+                    bluez::connect_device_outcome(ok, name.as_deref(), &message, timed_out),
+                    bluez::ConnectDeviceOutcome::WaitInProgress
+                ) {
+                    if let Ok(dev) = bluez::device_proxy(conn, existing_path).await {
+                        if wait_connected(&dev, Duration::from_secs(LIVE_CONNECT_TIMEOUT_S))
+                            .await
+                            .is_ok()
+                        {
+                            return finish_le_object(conn, existing_path, false).await;
+                        }
+                    }
+                }
+                last_err = Some(OneConnect {
+                    kind: if timed_out {
+                        ConnectFailureKind::Timeout
+                    } else {
+                        bluez::classify_connect_name_message(name.as_deref(), &message)
+                    },
+                    detail: if timed_out {
+                        "timed out".into()
+                    } else {
+                        message
+                    },
+                });
+                break;
+            }
+            bluez::ConnectDeviceOutcome::Recreate | bluez::ConnectDeviceOutcome::Error => {
+                last_err = Some(OneConnect {
+                    kind: bluez::classify_connect_name_message(name.as_deref(), &message),
+                    detail: message,
+                });
+                break;
+            }
+        }
+    }
+    Err(LeConnectErr::One(last_err.unwrap_or(OneConnect {
+        kind: ConnectFailureKind::Other,
+        detail: "ConnectDevice failed".into(),
+    })))
 }
 
 fn log_connect_fail(
@@ -1101,31 +1273,27 @@ mod tests {
     }
 
     #[test]
-    fn live_setup_ceiling_stays_under_a_minute() {
-        let ceiling = live_job_setup_ceiling();
-        assert!(
-            ceiling <= Duration::from_secs(60),
-            "live printer setup {ceiling:?} must not exceed a minute (plus head time)"
-        );
-        assert!(
-            Duration::from_secs(LIVE_CONNECT_TIMEOUT_S)
-                < Duration::from_secs(crate::protocol::mxw01::CONNECT_TIMEOUT_S)
-        );
-        // 3 × 8 s live Connect is the bulk; stacked 12 s pages + 5 s adverts would miss this.
+    fn live_setup_fits_printer_wait_window() {
+        assert_eq!(LIVE_CONNECT_TIMEOUT_S, 30);
         assert!(
             Duration::from_secs(LIVE_CONNECT_TIMEOUT_S) * u32::from(CONNECT_ATTEMPTS)
-                + HOST_ABORT_PAUSE * 2
-                < Duration::from_secs(35)
+                <= Duration::from_secs(120)
         );
         let src = include_str!("session.rs");
         assert!(
-            src.contains("LIVE_CONNECT_TIMEOUT_S"),
-            "try_one_connect must use the live timeout, not only mention it"
+            src.contains("connect_device"),
+            "live path must call Adapter1.ConnectDevice"
         );
         assert!(
-            src.contains("leftover_floor"),
-            "connect loop must honour leftover_floor"
+            src.contains("connect_device_outcome"),
+            "every ConnectDevice result must go through the outcome helper"
         );
+        assert!(
+            src.contains("remove_device"),
+            "AlreadyExists must RemoveDevice, not Device1.Connect the scan object"
+        );
+        assert!(src.contains("ensure_trusted"), "Trusted must be set once");
+        assert!(src.contains("leftover_floor"));
         let open = include_str!("mod.rs");
         let start = open.find("async fn open(").expect("open");
         let end = open.find("pub async fn print(").expect("print");
@@ -1134,10 +1302,25 @@ mod tests {
             !block.contains("cached printer did not answer"),
             "live cache must not fall through to an 8 s scan after ConnectFailed"
         );
+        assert!(block.contains("CONNECT_ATTEMPTS"));
         assert!(
-            block.contains("CONNECT_ATTEMPTS"),
-            "advertising cache uses the full attempt budget"
+            block.contains("stop_scan"),
+            "open() must stop discovery when the job no longer holds it"
         );
+    }
+
+    #[test]
+    fn phone_app_hint_only_on_peer_refuse() {
+        let timeout = connect_fail_hint("timeout: timed out", Some(-50), false);
+        assert!(
+            !timeout.contains("phone app"),
+            "generic timeout must not blame a phone: {timeout:?}"
+        );
+        let refuse = connect_fail_hint("connection refused", Some(-50), false);
+        assert!(refuse.contains("phone app"));
+        let settings = connect_fail_hint("timeout: timed out", None, true);
+        assert!(settings.contains("Bluetooth Settings"));
+        assert!(!settings.contains("phone app"));
     }
 
     #[test]

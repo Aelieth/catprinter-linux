@@ -173,7 +173,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         EngineConfig {
-            printer_wait: Duration::from_secs(600),
+            printer_wait: Duration::from_secs(120),
             queue_max: 16,
             max_document_bytes: 64 * 1024 * 1024,
             max_copies: 10,

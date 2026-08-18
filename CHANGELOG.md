@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.5 — 2026-08-17
+
+Hardware report on 0.2.4 (MT7925, BlueZ 5.87, MXW01): `Device1.Connect()`
+was paging **BR/EDR (Classic)** because the printer's ads look dual-mode
+(`0x0A` flags, public address). Every failure cut off at 8 s; every
+success was 11–16 s. `SetDiscoveryFilter(Transport=le)` does not choose
+the Connect transport.
+
+- LE-only connect via `Adapter1.ConnectDevice` with Address +
+  `AddressType=public`. If the method is missing (BlueZ `Experimental`
+  off), the job fails with a clear `NeedExperimental` message — not an
+  unexplained bus error. `AlreadyExists` removes the scan object and
+  retries ConnectDevice; `Device1.Connect` runs only on that LE object.
+  A Settings-held link (`Connected=true`) is reused after a failed
+  ConnectDevice. Install-time `main.conf` sets `Experimental = true`
+  (the daemon still does not write it at runtime).
+- Mark the Device1 **Trusted** once so a discovery-stop sweep cannot
+  prune it.
+- Live connect wait is **30 s**; default `CATPRINTER_PRINTER_WAIT` is
+  **120 s** (inside the printer's ~6 min idle sleep).
+- Discovery is stopped when `open()` returns — idle `Discovering=true`
+  kept the printer awake.
+- The "close the phone app" hint is only for a peer refuse. Same-host
+  clients share BlueZ's link.
+- `catprinter.service` is `Type=notify`; READY is signaled after the
+  IPP listener binds.
+
 ## 0.2.4 — 2026-08-17
 
 TemporaryTimeout=0 left unpaired Device1 objects with no RSSI; Connect

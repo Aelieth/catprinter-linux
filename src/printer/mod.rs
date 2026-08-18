@@ -69,6 +69,9 @@ pub enum PrintError {
     NoBluetoothd,
     #[error("Bluetooth is turned off on this computer")]
     AdapterOff,
+    /// BlueZ hid `Adapter1.ConnectDevice` behind Experimental (5.87).
+    #[error("Bluetooth on this computer cannot force an LE connect (BlueZ Experimental is off). An adult needs to run: sudo ./install.sh update")]
+    NeedExperimental,
     #[error("Cat printer not found — turn it on and keep it near the computer")]
     NotFound,
     #[error("Could not connect to the cat printer ({last}).{hint}")]
@@ -126,6 +129,7 @@ impl PrintError {
             // printer-wait deadline.
             PrintError::Condition(_) => true,
             PrintError::NotCatPrinter(_)
+            | PrintError::NeedExperimental
             | PrintError::Interrupted { .. }
             | PrintError::Cancelled
             | PrintError::Render(_)
@@ -148,7 +152,7 @@ impl PrintError {
     pub fn printer_reasons(&self) -> &'static [&'static str] {
         match self {
             PrintError::NotFound | PrintError::ConnectFailed { .. } => &["connecting-to-device"],
-            PrintError::NoBluetoothd | PrintError::AdapterOff => {
+            PrintError::NoBluetoothd | PrintError::AdapterOff | PrintError::NeedExperimental => {
                 &["connecting-to-device", "other-error"]
             }
             PrintError::Condition(c) => match c.error.as_deref() {
@@ -246,6 +250,7 @@ mod tests {
         // Terminal — retrying would reprint or can never work.
         assert!(!PrintError::Interrupted { lines_sent: 42 }.retryable());
         assert!(!PrintError::NotCatPrinter("phone".into()).retryable());
+        assert!(!PrintError::NeedExperimental.retryable());
         assert!(!PrintError::Cancelled.retryable());
         assert!(!PrintError::Io(std::io::Error::other("x")).retryable());
     }

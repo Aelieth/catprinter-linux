@@ -45,13 +45,12 @@ pub const NOTIFICATION_TIMEOUT_S: u64 = 7;
 pub const PRINT_COMPLETE_BASE_TIMEOUT_S: u64 = 15;
 /// …plus one second per this many lines.
 pub const PRINT_COMPLETE_LINES_PER_SEC: u64 = 15;
-/// Public ceiling for a Connect / InProgress wait. Not used for a live advert —
-/// that path uses [`LIVE_CONNECT_TIMEOUT_S`] so a powered-on printer cannot sit
-/// in a 12 s page. Kept at 12: docs and the `CATPRINTER_*` contract.
+/// Public ceiling kept at 12 for docs / older `CATPRINTER_*` notes. The live
+/// path uses [`LIVE_CONNECT_TIMEOUT_S`].
 pub const CONNECT_TIMEOUT_S: u64 = 12;
-/// Per-attempt Device1.Connect when the object is advertising or already held.
-/// 8 s cancelled hung in-flight connects on weak links; 20 s was too slow for kids.
-pub const LIVE_CONNECT_TIMEOUT_S: u64 = 8;
+/// Per-attempt LE connect (ConnectDevice / Device1.Connect on the LE object).
+/// Measured successes on MXW01 were 11–16 s; 8 s cut every one of them off.
+pub const LIVE_CONNECT_TIMEOUT_S: u64 = 30;
 /// BLE connect attempts before giving up.
 pub const CONNECT_ATTEMPTS: u8 = 3;
 
@@ -551,8 +550,8 @@ mod tests {
     fn connect_attempt_constants_are_the_public_contract() {
         assert_eq!(CONNECT_TIMEOUT_S, 12);
         assert_eq!(CONNECT_ATTEMPTS, 3);
-        const { assert!(LIVE_CONNECT_TIMEOUT_S < CONNECT_TIMEOUT_S) };
-        const { assert!(LIVE_CONNECT_TIMEOUT_S >= 6) };
+        assert_eq!(LIVE_CONNECT_TIMEOUT_S, 30);
+        const { assert!(LIVE_CONNECT_TIMEOUT_S * 3 <= 120) };
     }
 
     #[test]

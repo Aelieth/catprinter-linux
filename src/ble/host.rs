@@ -245,6 +245,8 @@ pub struct HostFacts {
     pub combo: bool,
     pub chip: ChipFamily,
     pub udev: bool,
+    /// Uncommented `Experimental = true` in main.conf (needed for ConnectDevice).
+    pub experimental: bool,
     pub bt_interfaces: Vec<BtUsbInterface>,
 }
 
@@ -281,13 +283,17 @@ impl HostFacts {
     }
 
     /// Labels + values printed by `catprinterd check` (does not affect READY).
-    pub fn check_lines(&self) -> [(&'static str, String); 5] {
+    pub fn check_lines(&self) -> [(&'static str, String); 6] {
         [
             ("TemporaryTimeout", self.temporary_timeout_line()),
             ("combo", self.combo_line().to_string()),
             ("bt chip", self.chip.as_str().to_string()),
             ("power/control", self.power_control_line()),
             ("udev", if self.udev { "present" } else { "absent" }.into()),
+            (
+                "Experimental",
+                if self.experimental { "true" } else { "false" }.into(),
+            ),
         ]
     }
 }
@@ -309,6 +315,23 @@ pub fn temporary_timeout_from_text(conf: &str) -> (u32, bool) {
         }
     }
     (BLUEZ_DEFAULT_TEMPORARY_TIMEOUT, true)
+}
+
+/// Uncommented `Experimental = true` in main.conf.
+pub fn experimental_from_text(conf: &str) -> bool {
+    for raw in conf.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let code = line.split_once('#').map(|(a, _)| a.trim()).unwrap_or(line);
+        let Some(rest) = code.strip_prefix("Experimental") else {
+            continue;
+        };
+        let val = rest.trim().trim_start_matches('=').trim();
+        return val.eq_ignore_ascii_case("true");
+    }
+    false
 }
 
 pub fn temporary_timeout_from_path(path: &Path) -> (u32, bool) {
@@ -445,6 +468,9 @@ fn chip_from_ifaces(ifaces: &[BtUsbInterface]) -> ChipFamily {
 
 pub fn collect_host_facts(usb_devices: &Path, main_conf: &Path) -> HostFacts {
     let (temporary_timeout, temporary_timeout_is_default) = temporary_timeout_from_path(main_conf);
+    let experimental = fs::read_to_string(main_conf)
+        .ok()
+        .is_some_and(|t| experimental_from_text(&t));
     let (combo, bt_interfaces) = usb_bt_facts(usb_devices);
     let chip = chip_from_ifaces(&bt_interfaces);
     HostFacts {
@@ -453,6 +479,7 @@ pub fn collect_host_facts(usb_devices: &Path, main_conf: &Path) -> HostFacts {
         combo,
         chip,
         udev: udev_rule_present(),
+        experimental,
         bt_interfaces,
     }
 }
@@ -485,6 +512,10 @@ mod tests {
             (30, true)
         );
         assert_eq!(temporary_timeout_from_text(""), (30, true));
+        assert!(experimental_from_text("Experimental = true\n"));
+        assert!(!experimental_from_text("#Experimental = true\n"));
+        assert!(!experimental_from_text("Experimental = false\n"));
+        assert!(!experimental_from_text(""));
         assert_eq!(
             temporary_timeout_from_text("DiscoverableTimeout = 0\n"),
             (30, true)

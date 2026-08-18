@@ -268,6 +268,32 @@ ensure_btusb_udev() {
   ok "udev $dest_etc (USB Bluetooth autosuspend off)"
 }
 
+# BlueZ 5.87 hides Adapter1.ConnectDevice unless Experimental is on. That method
+# is how we force LE instead of Classic on MXW01 ads that look dual-mode.
+ensure_bluez_experimental() {
+  local conf=/etc/bluetooth/main.conf tmp
+  mkdir -p /etc/bluetooth
+  if [[ -f $conf ]] && grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$conf"; then
+    ok "BlueZ Experimental already on ($conf)"
+    return 0
+  fi
+  if [[ -f $conf ]] && grep -qE '^[[:space:]]*Experimental[[:space:]]*=' "$conf"; then
+    tmp=$(mktemp)
+    sed -E 's/^[[:space:]]*Experimental[[:space:]]*=.*/Experimental = true/' "$conf" > "$tmp"
+    install -m 0644 "$tmp" "$conf"
+    rm -f "$tmp"
+  elif [[ -f $conf ]] && grep -qE '^\[General\]' "$conf"; then
+    tmp=$(mktemp)
+    awk 'BEGIN{d=0} /^\[General\]/{print; if(!d){print "Experimental = true"; d=1} next} {print} END{if(!d) print "\n[General]\nExperimental = true"}' "$conf" > "$tmp"
+    install -m 0644 "$tmp" "$conf"
+    rm -f "$tmp"
+  else
+    printf '\n[General]\nExperimental = true\n' >> "$conf"
+  fi
+  systemctl restart bluetooth >/dev/null 2>&1 || warn "restart bluetooth.service after Experimental = true"
+  ok "BlueZ Experimental = true in $conf (LE ConnectDevice)"
+}
+
 # A kit-installed machine that rebased onto an image-baked image: the /etc units shadow the image's.
 migrate_kit_off_image() {
   warn "kit files found on an image-baked machine — $UNIT_DIR/catprinter*.service shadow the image's units; removing the kit"
@@ -317,6 +343,7 @@ do_install() {
     if ! image_baked; then restorecon -R "$BIN" "$SHARE" "$UNIT_DIR/catprinter.service" "$UNIT_DIR/catprinter-queue.service" >/dev/null 2>&1 || true; fi
   fi
   ensure_btusb_udev
+  ensure_bluez_experimental
   systemctl daemon-reload
   systemctl enable "${UNITS[@]}" >/dev/null 2>&1 || true
   systemctl restart catprinter || { journalctl -u catprinter -n 30 --no-pager >&2 || true; die "catprinter.service failed to start"; }

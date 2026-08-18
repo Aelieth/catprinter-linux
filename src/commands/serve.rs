@@ -49,6 +49,27 @@ fn normalize_uuid(s: &str) -> String {
     }
 }
 
+/// Tell systemd the listener is bound (`Type=notify`). No-op without NOTIFY_SOCKET.
+fn systemd_notify_ready() {
+    let spec = match std::env::var("NOTIFY_SOCKET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    let sock = match std::os::unix::net::UnixDatagram::unbound() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let payload = b"READY=1\n";
+    if let Some(name) = spec.strip_prefix('@') {
+        use std::os::linux::net::SocketAddrExt;
+        if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()) {
+            let _ = sock.send_to_addr(payload, &addr);
+        }
+        return;
+    }
+    let _ = sock.send_to(payload, spec);
+}
+
 pub async fn run(args: ServeArgs) -> Result<()> {
     let shutdown = CancellationToken::new();
 
@@ -137,6 +158,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         crate::VERSION,
         pcfg.printer_uri()
     );
+    systemd_notify_ready();
 
     let dnssd_status = Arc::new(RwLock::new(
         serde_json::json!({"enabled": args.dnssd == OnOff::On, "registered": false}),

@@ -51,7 +51,11 @@ systemd `EnvironmentFile` syntax; after editing: `sudo systemctl restart catprin
 | `CATPRINTER_DEVICE` | any known cat printer | pin one printer (MAC or advertised name) |
 | `CATPRINTER_MODEL` | `auto` | `mxw01` / `classic` to skip autodetection |
 | `CATPRINTER_PORT` | `8095` | loopback IPP port (queue URI follows) |
-| `CATPRINTER_PRINTER_WAIT` | `600` | seconds a job waits for the printer to be switched on |
+| `CATPRINTER_PRINTER_WAIT` | `120` | seconds a job waits for the printer to be switched on (inside the ~6 min idle sleep) |
+
+`install.sh` also sets BlueZ `Experimental = true` in `/etc/bluetooth/main.conf` so
+`Adapter1.ConnectDevice` exists. MXW01 advertisements look dual-mode; without that
+method BlueZ `Device1.Connect` pages Classic and the printer never answers.
 | `CATPRINTER_LOG` | `info` | `debug`, `trace`, or a tracing filter |
 | `CATPRINTER_QUEUE` | `CatPrinter` | CUPS queue name |
 | `CATPRINTER_LOCATION` | Bluetooth, wherever… | printer-location text |
