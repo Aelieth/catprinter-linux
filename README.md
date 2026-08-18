@@ -1,8 +1,8 @@
 # catprinterd — because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
 
-![Catprinter with Nyan Cat](media/catprinter-with-nyancat.jpg)
+<img src="media/catprinter-with-nyancat.jpg" alt="Catprinter with Nyan Cat" width="400">
 
-*Meet the star: a pocket-sized Bluetooth thermal cat that prints “It’s Hack o’ Clock” and whatever else a kid (or tired adult) desires — once Linux is taught how to talk to it properly.*
+*Meet the star: a pocket-sized Bluetooth thermal cat that prints other cats (Nyan!) and whatever else a kid (or tired adult) desires — once Linux is taught how to talk to it properly.*
 
 You bought the cutest, cheapest little thermal printer on the internet. It has a face. It has ears. It costs less than lunch. And then you tried to use it on Linux.
 
