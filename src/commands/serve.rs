@@ -78,7 +78,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         .state_dir
         .clone()
         .or_else(|| std::env::var_os("STATE_DIRECTORY").map(std::path::PathBuf::from));
-    let adopted = state_dir.as_deref().and_then(crate::adopt::load);
+    let adopted = crate::adopt::load_any(state_dir.as_deref());
     let device_hint = args.ble.device.clone().or(adopted);
     let printer = match &args.fake_printer {
         Some(dir) => {

@@ -8,10 +8,7 @@ use crate::printer::PrintError;
 
 pub async fn run(args: BleArgs) -> i32 {
     let mut printer = BlePrinter {
-        device_hint: args
-            .device
-            .clone()
-            .or_else(|| crate::adopt::load(&crate::adopt::resolve_store_dir(None))),
+        device_hint: args.device.clone().or_else(|| crate::adopt::load_any(None)),
         adapter: args.adapter.clone(),
         forced_family: args.model.family(),
         slow: args.slow,

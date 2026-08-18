@@ -59,30 +59,57 @@ pub fn store_path(dir: &Path) -> PathBuf {
     dir.join(STORE_NAME)
 }
 
-/// Directory used for the adopted-MAC file.
+/// Directories that may hold the adopted-MAC file, first match wins on load.
 ///
-/// Order: explicit flag, `CATPRINTER_STATE_DIR`, systemd `STATE_DIRECTORY` (first entry),
-/// an existing DynamicUser private dir, then `/var/lib/catprinter`.
-pub fn resolve_store_dir(explicit: Option<&Path>) -> PathBuf {
+/// DynamicUser bind-mounts `StateDirectory=catprinter` over `/var/lib/private/catprinter`.
+/// A root `adopt` that only wrote `/var/lib/catprinter` is invisible inside that namespace
+/// unless we also write the private path; load therefore searches every candidate.
+pub fn candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !out.iter().any(|e| e == &p) {
+            out.push(p);
+        }
+    };
     if let Some(p) = explicit {
-        return p.to_path_buf();
+        push(p.to_path_buf());
+        return out;
     }
     if let Ok(s) = std::env::var("CATPRINTER_STATE_DIR") {
         if !s.is_empty() {
-            return PathBuf::from(s);
+            push(PathBuf::from(s));
         }
     }
     if let Ok(s) = std::env::var("STATE_DIRECTORY") {
         if let Some(first) = s.split(':').next().filter(|p| !p.is_empty()) {
-            return PathBuf::from(first);
+            push(PathBuf::from(first));
         }
     }
-    for p in [PRIVATE_STATE_DIR, DEFAULT_STATE_DIR] {
-        if Path::new(p).is_dir() {
-            return PathBuf::from(p);
+    push(PathBuf::from(PRIVATE_STATE_DIR));
+    push(PathBuf::from(DEFAULT_STATE_DIR));
+    out
+}
+
+/// Directory used when we must pick one place to create a file (auto-adopt).
+pub fn resolve_store_dir(explicit: Option<&Path>) -> PathBuf {
+    candidate_dirs(explicit)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR))
+}
+
+/// First adopted MAC found in `dirs`.
+pub fn load_from_dirs<P: AsRef<Path>>(dirs: impl IntoIterator<Item = P>) -> Option<String> {
+    for d in dirs {
+        if let Some(m) = load(d.as_ref()) {
+            return Some(m);
         }
     }
-    PathBuf::from(DEFAULT_STATE_DIR)
+    None
+}
+
+pub fn load_any(explicit: Option<&Path>) -> Option<String> {
+    load_from_dirs(candidate_dirs(explicit))
 }
 
 /// `AA:BB:CC:DD:EE:FF` or `None` if this is not a BD_ADDR.
@@ -137,12 +164,38 @@ pub fn persist(dir: &Path, address: &str) -> io::Result<String> {
     Ok(mac)
 }
 
-/// Record on first successful live connect. Does not overwrite an existing MAC.
+/// Record on first successful live connect. Does not overwrite an existing MAC
+/// in `dir` (the daemon's writable StateDirectory).
 pub fn persist_if_empty(dir: &Path, address: &str) -> io::Result<Option<String>> {
     if load(dir).is_some() {
         return Ok(None);
     }
     persist(dir, address).map(Some)
+}
+
+/// Write the MAC into every given directory. Last successful write wins as the
+/// returned value. Used so a host-namespace `adopt` is visible inside DynamicUser.
+pub fn persist_to_all<P: AsRef<Path>>(dirs: &[P], address: &str) -> io::Result<String> {
+    let mut last_err: Option<io::Error> = None;
+    let mut mac = None;
+    for d in dirs {
+        match persist(d.as_ref(), address) {
+            Ok(m) => mac = Some(m),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    mac.ok_or_else(|| last_err.unwrap_or_else(|| io::Error::other("no adopt store directory")))
+}
+
+/// Persist for the CLI: explicit dir, else both DynamicUser-private and public paths.
+pub fn persist_visible(explicit: Option<&Path>, address: &str) -> io::Result<String> {
+    if let Some(p) = explicit {
+        return persist(p, address);
+    }
+    persist_to_all(
+        &[Path::new(PRIVATE_STATE_DIR), Path::new(DEFAULT_STATE_DIR)],
+        address,
+    )
 }
 
 pub fn clear(dir: &Path) -> io::Result<Option<String>> {
@@ -156,8 +209,24 @@ pub fn clear(dir: &Path) -> io::Result<Option<String>> {
     Ok(had)
 }
 
+pub fn clear_all(explicit: Option<&Path>) -> Option<String> {
+    let mut had = None;
+    for d in candidate_dirs(explicit) {
+        if let Ok(Some(m)) = clear(&d) {
+            had = Some(m);
+        }
+    }
+    had
+}
+
 pub fn status_of(dir: &Path) -> AdoptOutcome {
     AdoptOutcome::Status { address: load(dir) }
+}
+
+pub fn status_any(explicit: Option<&Path>) -> AdoptOutcome {
+    AdoptOutcome::Status {
+        address: load_any(explicit),
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +316,32 @@ mod tests {
     fn resolve_store_dir_honours_explicit() {
         let p = Path::new("/tmp/explicit-catprinter-state");
         assert_eq!(resolve_store_dir(Some(p)), p);
+        assert_eq!(candidate_dirs(Some(p)), vec![p.to_path_buf()]);
+    }
+
+    #[test]
+    fn load_finds_mac_in_any_candidate_so_dynamicuser_does_not_hide_it() {
+        let public = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        // Empty private dir (daemon has started) must not hide a public adopt.
+        persist(public.path(), "AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(load(private.path()), None);
+        assert_eq!(
+            load_from_dirs([private.path(), public.path()]).as_deref(),
+            Some("AA:BB:CC:DD:EE:FF")
+        );
+        assert_eq!(
+            status_any_from(&[private.path(), public.path()]).message(),
+            "adopted AA:BB:CC:DD:EE:FF"
+        );
+        persist_to_all(&[private.path(), public.path()], "11:22:33:44:55:66").unwrap();
+        assert_eq!(load(private.path()).as_deref(), Some("11:22:33:44:55:66"));
+        assert_eq!(load(public.path()).as_deref(), Some("11:22:33:44:55:66"));
+    }
+
+    fn status_any_from(dirs: &[&Path]) -> AdoptOutcome {
+        AdoptOutcome::Status {
+            address: load_from_dirs(dirs.iter().copied()),
+        }
     }
 }

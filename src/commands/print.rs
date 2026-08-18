@@ -115,7 +115,7 @@ pub async fn run(args: PrintArgs) -> i32 {
             .ble
             .device
             .clone()
-            .or_else(|| crate::adopt::load(&crate::adopt::resolve_store_dir(None))),
+            .or_else(|| crate::adopt::load_any(None)),
         adapter: args.ble.adapter.clone(),
         forced_family: args.ble.model.family(),
         slow: args.ble.slow,

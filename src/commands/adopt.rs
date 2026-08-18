@@ -14,18 +14,18 @@ use crate::printer::PrintError;
 use crate::protocol::mxw01::LIVE_CONNECT_TIMEOUT_S;
 
 pub async fn run(args: AdoptArgs) -> i32 {
-    let dir = adopt::resolve_store_dir(args.state_dir.as_deref());
+    let explicit = args.state_dir.as_deref();
     if args.status {
-        let o = adopt::status_of(&dir);
+        let o = adopt::status_any(explicit);
         println!("{}", o.message());
         return o.exit_code();
     }
     if args.forget {
-        let o = forget(&dir, args.device.as_deref()).await;
+        let o = forget(explicit, args.device.as_deref()).await;
         println!("{}", o.message());
         return o.exit_code();
     }
-    match adopt_now(&dir, args.device.as_deref(), args.adapter.as_deref()).await {
+    match adopt_now(explicit, args.device.as_deref(), args.adapter.as_deref()).await {
         Ok(o) => {
             if matches!(o, AdoptOutcome::PrinterOff | AdoptOutcome::NeedExperimental) {
                 eprintln!("{}", o.message());
@@ -41,11 +41,11 @@ pub async fn run(args: AdoptArgs) -> i32 {
     }
 }
 
-async fn forget(dir: &Path, device: Option<&str>) -> AdoptOutcome {
+async fn forget(explicit: Option<&Path>, device: Option<&str>) -> AdoptOutcome {
     let mac = device
         .and_then(adopt::normalize_mac)
-        .or_else(|| adopt::load(dir));
-    let _ = adopt::clear(dir);
+        .or_else(|| adopt::load_any(explicit));
+    let _ = adopt::clear_all(explicit);
     if let Some(ref mac) = mac {
         let _ = remove_trusted_record(None, mac).await;
     }
@@ -99,11 +99,11 @@ async fn device_is_trusted(adapter: Option<&str>, mac: &str) -> bool {
 }
 
 async fn adopt_now(
-    dir: &Path,
+    explicit: Option<&Path>,
     device: Option<&str>,
     adapter: Option<&str>,
 ) -> Result<AdoptOutcome, PrintError> {
-    let already = adopt::load(dir);
+    let already = adopt::load_any(explicit);
     let hint_mac = device.and_then(adopt::normalize_mac);
 
     if let (Some(mac), Some(want)) = (already.as_deref(), hint_mac.as_deref()) {
@@ -151,13 +151,15 @@ async fn adopt_now(
     .await
     {
         Ok(c) => c,
-        Err(PrintError::NotFound) => return Ok(AdoptOutcome::PrinterOff),
-        Err(e) => return Err(e),
+        Err(e) => match outcome_from_connect(&e) {
+            Some(o) => return Ok(o),
+            None => return Err(e),
+        },
     };
 
     match force_le_trusted(&conn, &adapter_info.path, &cand.address, &cand.path).await {
         Ok(()) => {
-            let mac = adopt::persist(dir, &cand.address).map_err(PrintError::Io)?;
+            let mac = adopt::persist_visible(explicit, &cand.address).map_err(PrintError::Io)?;
             let already = already
                 .as_deref()
                 .is_some_and(|a| a.eq_ignore_ascii_case(&mac));
@@ -167,9 +169,19 @@ async fn adopt_now(
                 already,
             })
         }
-        Err(PrintError::NeedExperimental) => Ok(AdoptOutcome::NeedExperimental),
-        Err(PrintError::NotFound) => Ok(AdoptOutcome::PrinterOff),
-        Err(e) => Err(e),
+        Err(e) => match outcome_from_connect(&e) {
+            Some(o) => Ok(o),
+            None => Err(e),
+        },
+    }
+}
+
+/// Map a connect/scan failure onto the operator-facing adopt outcome.
+pub fn outcome_from_connect(e: &PrintError) -> Option<AdoptOutcome> {
+    match e {
+        PrintError::NotFound => Some(AdoptOutcome::PrinterOff),
+        PrintError::NeedExperimental => Some(AdoptOutcome::NeedExperimental),
+        _ => None,
     }
 }
 
@@ -263,10 +275,15 @@ mod tests {
 
     #[test]
     fn printer_off_is_the_shipped_outcome() {
-        let o = AdoptOutcome::PrinterOff;
+        let o = outcome_from_connect(&PrintError::NotFound).unwrap();
+        assert_eq!(o, AdoptOutcome::PrinterOff);
         assert_ne!(o.exit_code(), 0);
         assert!(o.message().contains("switch it on"));
         assert_eq!(o.message(), crate::adopt::printer_off_message());
+        assert_eq!(
+            outcome_from_connect(&PrintError::NeedExperimental),
+            Some(AdoptOutcome::NeedExperimental)
+        );
     }
 
     #[test]

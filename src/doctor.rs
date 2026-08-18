@@ -290,10 +290,10 @@ pub async fn collect(
     port: u16,
     queue: &str,
     adapter: Option<&str>,
-    state_dir: &Path,
+    state_dir: Option<&Path>,
 ) -> DoctorReport {
     let facts = host::collect_default();
-    let adopted_address = crate::adopt::load(state_dir);
+    let adopted_address = crate::adopt::load_any(state_dir);
     let experimental = facts.experimental;
     let blocked = bluetooth_blocked();
     let autosuspend = autosuspend_from_facts(&facts);
@@ -369,6 +369,78 @@ pub async fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collect_json_has_distinct_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::adopt::persist(dir.path(), "AA:BB:CC:DD:EE:FF").unwrap();
+        let report = collect(8095, "CatPrinter", None, Some(dir.path())).await;
+        let v: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        for key in [
+            "trusted_le",
+            "connect_transport",
+            "connect_device",
+            "experimental",
+            "queue_present",
+            "queue_points_at_daemon",
+            "port",
+            "daemon_up",
+            "adapter_powered",
+            "adapter_blocked",
+            "adapter_autosuspend",
+            "rssi",
+            "rssi_age_ms",
+            "adopted",
+            "adopted_address",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "missing {key} in {}",
+                report.to_json()
+            );
+        }
+        assert_eq!(v["adopted"], true);
+        assert_eq!(v["adopted_address"], "AA:BB:CC:DD:EE:FF");
+        assert_eq!(v["port"], 8095);
+        assert!(
+            v["connect_transport"] == "le" || v["connect_transport"] == "classic",
+            "{}",
+            v["connect_transport"]
+        );
+        assert!(v["rssi"].is_null(), "stale RSSI must be omitted: {v}");
+    }
+
+    #[test]
+    fn trusted_le_snapshot_from_shipped_object_walk() {
+        use std::collections::HashMap;
+        use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+        let mut objs: bluez::Objects = Default::default();
+        let ov = |v: Value<'static>| OwnedValue::try_from(v).unwrap();
+        let mut map = HashMap::new();
+        map.insert("Address".into(), ov(Value::from("AA:BB:CC:DD:EE:FF")));
+        map.insert("Trusted".into(), ov(Value::from(true)));
+        map.insert("Connected".into(), ov(Value::from(false)));
+        map.insert("AddressType".into(), ov(Value::from("public")));
+        map.insert("RSSI".into(), ov(Value::from(-39i16)));
+        let mut ifaces = HashMap::new();
+        ifaces.insert(
+            zbus::names::OwnedInterfaceName::try_from(bluez::IFACE_DEVICE).unwrap(),
+            map,
+        );
+        objs.insert(
+            OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap(),
+            ifaces,
+        );
+        let snap =
+            device_snapshot_from_objects(&objs, "/org/bluez/hci0", "aa:bb:cc:dd:ee:ff").unwrap();
+        assert!(snap.trusted);
+        assert_eq!(snap.address_type.as_deref(), Some("public"));
+        assert!(is_le_address_type(snap.address_type.as_deref()));
+        assert_eq!(snap.rssi, Some(-39));
+        assert!(!snap.connected);
+        let (rssi, age) = rssi_for_report(snap.connected, snap.rssi, None);
+        assert!(rssi.is_none() && age.is_none(), "stale cache RSSI omitted");
+    }
 
     #[test]
     fn doctor_json_has_distinct_required_fields() {
