@@ -1,6 +1,6 @@
 [package]
 name = "catprinterd"
-version = "3.0.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "IPP Everywhere driver for Bluetooth cat printers (MXW01, GB0x/GT01/MX0x/YT01/X5/X6)"

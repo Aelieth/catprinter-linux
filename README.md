@@ -1,6 +1,6 @@
-### Because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
+# catprinterd — because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
 
-![Catprinter nyan!](catprinter-with-nyancat.jpg)
+![Catprinter with Nyan Cat](media/catprinter-with-nyancat.jpg)
 
 *Meet the star: a pocket-sized Bluetooth thermal cat that prints “It’s Hack o’ Clock” and whatever else a kid (or tired adult) desires — once Linux is taught how to talk to it properly.*
 
@@ -22,7 +22,7 @@ File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──�
 
 No pairing. No MAC addresses. No phone apps. That is the entire contract.
 
-- **Hold-and-wait magic:** If the printer is off, the job waits (2 minutes by default) and the queue says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints. If the cat is already awake, the print should start in a few seconds — they nap after ~5–6 minutes of boredom, so a 10-minute wait only blocks the queue.  
+- **Hold-and-wait magic:** If the printer is off, the job waits (2 minutes by default) and the queue says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints. If the cat is already awake, the print should start in a few seconds — they nap after ~5–6 minutes of boredom, so a longer wait only blocks the queue.  
 - **Immutable-first:** One self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two systemd units, one env file. Nothing layered into rpm-ostree; runtime needs only base-image packages (`cups`, `cups-filters`, `bluez`, `util-linux`, `policycoreutils`, `curl`; `avahi` optional).  
 - **Model autodetect:** MXW01 (16-level grayscale) or the classic family; a new printer simply works.
 

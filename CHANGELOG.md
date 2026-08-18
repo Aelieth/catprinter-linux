@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.0.0 — 2026-08-17
+## 0.3.0 — 2026-08-17
 
 Print dialog matches the original kid settings ([original-settings.md](original-settings.md)).
 Style and tone are independent again: Picture no longer forces grayscale.
