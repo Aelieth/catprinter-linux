@@ -47,7 +47,7 @@ Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPR
 
 | Setting | Choices | What happens |
 |---|---|---|
-| Media / paper size | **Cat tape 48 mm** (default), Cat tape long, **Document A4**, Document Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Document A4/Letter: shrink the *whole* homework page (no trim). |
+| Media / paper size | **Cat tape 48 mm** (default), Cat tape long, **Document A4**, Document Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Document A4/Letter: 48 mm × A4/Letter aspect so CUPS shrinks the *whole* homework page to 384 dots (no trim, not a left strip). |
 | Print quality | **Default** (drawings), Text (sharp), Picture (photos / crayon) | style only — dither and heat. Does **not** pick grayscale. |
 | Color / tone | **Black and white** (default), Grayscale | 1-bit vs 16-level burn on the MXW01. Picture + Grayscale is the photo path. |
 | Paper type | **Paper**, Sticker | Label only. Same heat. |

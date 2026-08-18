@@ -76,7 +76,8 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 
 * Printer: **CatPrinter** (never the default — a 48 mm tape must not receive homework by accident).
 * **Media**: **Cat tape 48 mm** (default) · Cat tape long · **Document A4** / Document Letter
-  (whole homework page shrunk to the tape) · Custom (48 mm × up to 5000 mm).
+  (48 mm × A4/Letter aspect — whole homework page shrunk to 384 dots, not a left strip) ·
+  Custom (48 mm × up to 5000 mm).
 * **Print quality**: **Default** (drawings) · Text (sharp) · Picture (photos / crayon). Style only.
 * **Color / tone**: **Black and white** (default) · Grayscale (16-level on the MXW01). Picture +
   Grayscale is the photo path.

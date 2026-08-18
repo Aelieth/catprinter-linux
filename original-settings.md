@@ -36,8 +36,10 @@ PPD: `CatQuality Document` ran `setpagedevice` A4, and UIConstraints
 forbade combining Document with Roll48 / Roll48Long.
 
 **In the remade driver (no vendor PPD):** pick paper size **Document A4**
-or **Document Letter**. Sheet media selects the Document preset (threshold,
-no trim, `0x68`) so homework type stays solid.
+or **Document Letter**. Those sizes are advertised at 48 mm × A4/Letter
+aspect so CUPS rasterises the whole page to 384 dots (true 210 mm A4
+produced a left strip). Media-size-name selects the Document preset
+(threshold, no trim, `0x68`) even at tape width.
 
 ### Tone — `CatTone` (orthogonal)
 

@@ -152,7 +152,7 @@ impl JobOptions {
     }
 
     pub fn is_sheet_media(&self) -> bool {
-        self.media.as_ref().is_some_and(|m| !m.is_tape())
+        self.media.as_ref().is_some_and(|m| m.is_document())
     }
 }
 
@@ -269,8 +269,8 @@ mod tests {
             .add(
                 "media-size",
                 Coll::new()
-                    .add("x-dimension", v_int(21000))
-                    .add("y-dimension", v_int(29700))
+                    .add("x-dimension", v_int(media::A4.x_hmm))
+                    .add("y-dimension", v_int(media::A4.y_hmm))
                     .build(),
             )
             .add("media-size-name", v_kw("iso_a4_210x297mm"))
@@ -283,6 +283,11 @@ mod tests {
         assert_eq!(ro.preset, Preset::Document);
         assert_eq!(ro.layout, Layout::Sheet);
         assert!(!ro.preset.trim());
+        assert_eq!(o.media.as_ref().unwrap().x_hmm, 4800);
+        assert!(
+            o.is_sheet_media(),
+            "Document A4 at tape width must stay the no-trim path"
+        );
         // JPEG passthrough stays tape even if the job claimed A4.
         let ro = o.render_options(&base, true);
         assert_eq!(ro.layout, Layout::Tape);
@@ -339,14 +344,14 @@ mod tests {
             .add(
                 "media-size",
                 Coll::new()
-                    .add("x-dimension", v_int(21000))
-                    .add("y-dimension", v_int(29700))
+                    .add("x-dimension", v_int(media::A4.x_hmm))
+                    .add("y-dimension", v_int(media::A4.y_hmm))
                     .build(),
             )
             .add("media-size-name", v_kw("iso_a4_210x297mm"))
             .build();
         let o = JobOptions::from_request(&req_with(vec![("media-col", mc)]), 10);
-        assert_eq!(o.media.as_ref().unwrap().x_hmm, 21000);
+        assert_eq!(o.media.as_ref().unwrap().x_hmm, media::A4.x_hmm);
         assert!(o.is_sheet_media());
         let o = JobOptions::from_request(
             &req_with(vec![("media", v_kw("custom_cat-tape_48x297mm"))]),

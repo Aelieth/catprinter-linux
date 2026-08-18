@@ -28,8 +28,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(test)]
 mod tests {
     #[test]
-    fn crate_version_is_0_3_0() {
-        assert_eq!(crate::VERSION, "0.3.0");
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
+    fn crate_version_is_0_3_1() {
+        assert_eq!(crate::VERSION, "0.3.1");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.1");
     }
 }

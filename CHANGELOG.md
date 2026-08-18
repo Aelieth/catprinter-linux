@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-08-18
+
+Printer-properties: Document A4 / Document Letter are advertised at **48 mm
+tape width × A4/Letter aspect** so CUPS rasterises the whole homework page to
+384 dots (0.3.0 used true 210 mm / 8.5 in width and printed a left strip).
+Document is selected by media-size-name (`iso_a4` / `na_letter`), not by
+width — otherwise 48 mm homework would be trimmed as tape.
+`pwg-raster-document-type-supported` is `black_1` and `sgray_8` so
+**Black and white** and **Grayscale** both appear (default Black and white).
+Quality strings also map cupsPrintQuality Draft/Normal/High → Text/Default/Picture.
+
+`install.sh update` (or equivalent queue refresh) is required so the driverless
+PPD is regenerated.
+
 ## 0.3.0 — 2026-08-18
 
 Retracts the mistaken `v3.0.0` tag / GitHub Release (semver `3.0.0` is

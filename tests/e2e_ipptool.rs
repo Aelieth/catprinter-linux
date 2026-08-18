@@ -116,8 +116,8 @@ fn http_body(resp: &str) -> &str {
 }
 
 #[test]
-fn shipped_binary_version_is_0_3_0() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
+fn shipped_binary_version_is_0_3_1() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.1");
     let out = Command::new(env!("CARGO_BIN_EXE_catprinterd"))
         .arg("--version")
         .output()
@@ -130,7 +130,7 @@ fn shipped_binary_version_is_0_3_0() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         text.trim(),
-        "catprinterd 0.3.0",
+        "catprinterd 0.3.1",
         "stdout={text:?} stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -145,7 +145,7 @@ fn health_and_status_page() {
         .unwrap_or_else(|e| panic!("live /health is not JSON ({e}): {json}"));
     assert_eq!(
         v.get("version").and_then(|x| x.as_str()),
-        Some("0.3.0"),
+        Some("0.3.1"),
         "{json}"
     );
     assert_eq!(
@@ -155,12 +155,104 @@ fn health_and_status_page() {
     );
     let page = ureq_get(d.port, "/");
     assert!(page.contains("Cat Printer"));
-    assert!(page.contains("catprinterd 0.3.0"), "{page}");
+    assert!(page.contains("catprinterd 0.3.1"), "{page}");
     let strings = ureq_get(d.port, "/strings/en.strings");
     assert!(strings.contains("Cat tape 48 mm"));
     assert!(strings.contains("Document A4"));
+    assert!(strings.contains("Document Letter"));
+    assert!(strings.contains("\"print-quality.3\" = \"Text\";"));
+    assert!(strings.contains("\"print-quality.4\" = \"Default\";"));
     assert!(strings.contains("\"print-quality.5\" = \"Picture\";"));
+    assert!(strings.contains("\"print-color-mode.bi-level\" = \"Black and white\";"));
+    assert!(strings.contains("\"print-color-mode.monochrome\" = \"Grayscale\";"));
+    assert!(strings.contains("\"cupsPrintQuality.Draft\" = \"Text\";"));
+    assert!(strings.contains("\"ColorModel.FastGray\" = \"Black and white\";"));
     assert!(strings.contains("\"media-type.labels\" = \"Sticker\";"));
+}
+
+/// IPP POST; returns the IPP body (after HTTP headers).
+fn ipp_post(port: u16, payload: &[u8]) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        s,
+        "POST /ipp/print HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    )
+    .unwrap();
+    s.write_all(payload).unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    let split = out
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("http headers");
+    out[split + 4..].to_vec()
+}
+
+fn get_printer_attributes(port: u16) -> catprinterd::ipp::codec::Request {
+    use catprinterd::ipp::codec::{v_kws, v_uri, Group, Resp, Status};
+    // Resp::new writes a response header (status 0); overwrite with op 0x000B after.
+    let mut r = Resp::new(0x0200, Status::SuccessfulOk, 1);
+    r.add(
+        Group::OperationAttributes,
+        "printer-uri",
+        v_uri(&format!("ipp://127.0.0.1:{port}/ipp/print")),
+    );
+    r.add(
+        Group::OperationAttributes,
+        "requested-attributes",
+        v_kws(&[
+            "media-col-database",
+            "print-color-mode-supported",
+            "print-color-mode-default",
+            "print-quality-supported",
+            "pwg-raster-document-type-supported",
+        ]),
+    );
+    let mut bytes = r.into_bytes().to_vec();
+    bytes[2] = 0x00;
+    bytes[3] = 0x0B; // Get-Printer-Attributes
+    let body = ipp_post(port, &bytes);
+    catprinterd::ipp::codec::parse_slice(&body).expect("parse Get-Printer-Attributes")
+}
+
+#[test]
+fn live_document_sizes_are_tape_width_and_both_tones_exist() {
+    use catprinterd::ipp::codec::Group;
+    use catprinterd::ipp::media;
+    let d = spawn_daemon(&[]);
+    let back = get_printer_attributes(d.port);
+    let colors = back.get_strs(Some(Group::PrinterAttributes), "print-color-mode-supported");
+    assert!(
+        colors.iter().any(|c| c == "bi-level") && colors.iter().any(|c| c == "monochrome"),
+        "need Black and white + Grayscale, got {colors:?}"
+    );
+    assert_eq!(
+        back.get_str(Some(Group::PrinterAttributes), "print-color-mode-default")
+            .as_deref(),
+        Some("bi-level")
+    );
+    let rasters = back.get_strs(
+        Some(Group::PrinterAttributes),
+        "pwg-raster-document-type-supported",
+    );
+    assert!(
+        rasters.iter().any(|c| c == "black_1") && rasters.iter().any(|c| c == "sgray_8"),
+        "{rasters:?}"
+    );
+    let (ax, ay) = back
+        .media_database_xy(media::A4.name)
+        .expect("Document A4 in live media-col-database");
+    let (lx, ly) = back
+        .media_database_xy(media::LETTER.name)
+        .expect("Document Letter in live media-col-database");
+    assert_eq!((ax, ay), (media::A4.x_hmm, media::A4.y_hmm));
+    assert_eq!((lx, ly), (media::LETTER.x_hmm, media::LETTER.y_hmm));
+    assert_eq!(ax, 4800);
+    assert_eq!(lx, 4800);
+    assert_eq!(ax, media::TAPE_X_HMM);
 }
 
 /// Minimal HTTP GET (no client crate needed).

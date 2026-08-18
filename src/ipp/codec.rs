@@ -107,6 +107,45 @@ impl Request {
             .find(|(k, _)| k.as_str().eq_ignore_ascii_case(member))
             .map(|(_, v)| v)
     }
+    /// `x-dimension` / `y-dimension` of a `media-col-database` entry with this PWG name.
+    pub fn media_database_xy(&self, pwg_name: &str) -> Option<(i32, i32)> {
+        let v = self.get(Some(Group::PrinterAttributes), "media-col-database")?;
+        let entries: &[IppValue] = match v {
+            IppValue::Array(a) => a,
+            IppValue::Collection(_) => std::slice::from_ref(v),
+            _ => return None,
+        };
+        for e in entries {
+            let IppValue::Collection(c) = e else {
+                continue;
+            };
+            let name = c
+                .iter()
+                .find(|(n, _)| n.as_str() == "media-size-name")
+                .and_then(|(_, v)| value_to_string(v));
+            if !name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(pwg_name))
+            {
+                continue;
+            }
+            let size = c.iter().find(|(n, _)| n.as_str() == "media-size")?.1;
+            let IppValue::Collection(ms) = size else {
+                continue;
+            };
+            let get = |k: &str| {
+                ms.iter()
+                    .find(|(n, _)| n.as_str() == k)
+                    .and_then(|(_, v)| match v {
+                        IppValue::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+            };
+            return Some((get("x-dimension")?, get("y-dimension")?));
+        }
+        None
+    }
+
     /// Names of the operation-attributes group in order (for RFC 8011 §4.1.4 order checks).
     pub fn operation_attr_names(&self) -> Vec<String> {
         self.attrs
@@ -168,6 +207,10 @@ pub fn parse(body: Bytes) -> Result<Request, CodecError> {
         attrs,
         payload,
     })
+}
+
+pub fn parse_slice(body: &[u8]) -> Result<Request, CodecError> {
+    parse(Bytes::copy_from_slice(body))
 }
 
 /// `parse` with the crate's own panics contained (it slices some language-tagged values without

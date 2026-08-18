@@ -841,7 +841,11 @@ impl IppService {
             Desc,
             v_mimes(&DOCUMENT_FORMATS),
         );
-        put("pwg-raster-document-type-supported", Desc, v_kw("sgray_8"));
+        put(
+            "pwg-raster-document-type-supported",
+            Desc,
+            v_kws(&["black_1", "sgray_8"]),
+        );
         put(
             "pwg-raster-document-resolution-supported",
             Desc,
@@ -1214,6 +1218,117 @@ mod tests {
         assert!(back
             .get(Some(Group::PrinterAttributes), "media-col-database")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn document_and_tone_attributes_for_cups() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path());
+        let out = svc.handle(build_req(
+            0x0200,
+            OP_GET_PRINTER_ATTRIBUTES,
+            1,
+            std_ops(vec![(
+                "requested-attributes",
+                v_kws(&["all", "media-col-database"]),
+            )]),
+            b"",
+        ));
+        assert_eq!(status_of(&out.body), 0x0000);
+        let back = parse(out.body).unwrap();
+        let colors = back.get_strs(Some(Group::PrinterAttributes), "print-color-mode-supported");
+        assert!(
+            colors.iter().any(|c| c == "bi-level") && colors.iter().any(|c| c == "monochrome"),
+            "{colors:?}"
+        );
+        assert_eq!(
+            back.get_str(Some(Group::PrinterAttributes), "print-color-mode-default")
+                .as_deref(),
+            Some("bi-level")
+        );
+        let rasters = back.get_strs(
+            Some(Group::PrinterAttributes),
+            "pwg-raster-document-type-supported",
+        );
+        assert!(
+            rasters.iter().any(|c| c == "black_1") && rasters.iter().any(|c| c == "sgray_8"),
+            "{rasters:?}"
+        );
+        assert_eq!(
+            back.get_ints(Some(Group::PrinterAttributes), "print-quality-supported"),
+            vec![3, 4, 5]
+        );
+        assert_eq!(
+            back.media_database_xy(media::A4.name),
+            Some((media::A4.x_hmm, media::A4.y_hmm))
+        );
+        assert_eq!(
+            back.media_database_xy(media::LETTER.name),
+            Some((media::LETTER.x_hmm, media::LETTER.y_hmm))
+        );
+        assert_eq!(media::A4.x_hmm, 4800);
+        assert_eq!(media::LETTER.x_hmm, 4800);
+    }
+
+    #[tokio::test]
+    async fn document_a4_fake_job_is_384_wide_document_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path());
+        let pwg = include_bytes!("../../tests/fixtures/tiny-roll48.pwg");
+        let mc = Coll::new()
+            .add(
+                "media-size",
+                Coll::new()
+                    .add("x-dimension", v_int(media::A4.x_hmm))
+                    .add("y-dimension", v_int(media::A4.y_hmm))
+                    .build(),
+            )
+            .add("media-size-name", v_kw(media::A4.name))
+            .build();
+        let mut body = Vec::new();
+        body.extend(0x0200u16.to_be_bytes());
+        body.extend(OP_PRINT_JOB.to_be_bytes());
+        body.extend(1i32.to_be_bytes());
+        body.push(0x01);
+        for (n, v) in std_ops(vec![
+            ("document-format", v_mime("image/pwg-raster")),
+            ("job-name", v_name("Homework")),
+        ]) {
+            let a = ipp::attribute::IppAttribute::new(ipp::value::IppName::new_truncated(n), v);
+            body.extend(a.to_bytes());
+        }
+        body.push(0x02);
+        for (n, v) in [
+            ("media-col", mc),
+            ("print-quality", v_enum(4)),
+            ("print-color-mode", v_kw("bi-level")),
+        ] {
+            let a = ipp::attribute::IppAttribute::new(ipp::value::IppName::new_truncated(n), v);
+            body.extend(a.to_bytes());
+        }
+        body.push(0x03);
+        body.extend(pwg.iter().copied());
+        let out = svc.handle(bytes::Bytes::from(body));
+        assert_eq!(status_of(&out.body), 0x0000, "Print-Job rejected");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let json_path = loop {
+            let found = std::fs::read_dir(dir.path()).unwrap().flatten().find(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("job-") && n.ends_with(".json")
+            });
+            if found.is_some() || std::time::Instant::now() >= deadline {
+                break found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let json_path = json_path.expect("fake printer wrote no job-*.json").path();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(json["preset"], "document", "{json}");
+        assert_eq!(json["layout"], "Sheet", "{json}");
+        assert_eq!(json["width"], 384, "{json}");
+        assert_eq!(json["tone"], "blackwhite", "{json}");
     }
 
     #[tokio::test]
