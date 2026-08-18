@@ -24,6 +24,7 @@ base-image packages: `cups`, `cups-filters`, `bluez`, `util-linux` (rfkill), `po
 ```sh
 sudo ./install.sh              # install or upgrade
 sudo ./install.sh status       # units, health, queue, journal (works without sudo too)
+sudo ./install.sh status --json  # same facts as JSON; exit 0 only when healthy
 sudo ./install.sh update       # same as install (binary swap + restart)
 sudo ./install.sh uninstall    # remove queue, units, files; add --purge to drop /etc/catprinter too
 ```
@@ -38,9 +39,12 @@ What it does: installs `/usr/local/bin/catprinterd`, `catprinter.service` (the d
 the daemon), keeps a copy of the units + `VERSION`/`INSTALLED` under `/usr/local/share/catprinter`,
 creates `/etc/catprinter/env`, waits for the daemon, and prints a status table. It never makes the
 cat printer the system default. Re-running is safe. `status` exits 0 only when both units are
-active, the queue exists and no kit files shadow an image (see below); it warns when
+active, the queue exists and no kit files shadow an image (see below); `status --json` is the
+same facts without grepping prose. `uninstall` reverts BlueZ `Experimental` only if this kit
+turned it on, and removes the adopted trusted printer record. It warns when
 `CATPRINTERD_ARGS` carries `--port/--queue/--bind` (only `CATPRINTER_PORT/QUEUE` are honoured by
-the queue unit and this script).
+the queue unit and this script). After install: `catprinterd adopt` (or just print once) pins
+the printer; `catprinterd doctor --json` is the integrator health check.
 
 ## Settings — `/etc/catprinter/env`
 

@@ -793,4 +793,94 @@ ATTR{bDeviceClass}=="e0", ATTR{power/control}="on"
         assert!(combo);
         assert_eq!(ifaces.len(), 3);
     }
+
+    fn kit_experimental(op: &str, conf: &Path, stamp: &Path) {
+        let script = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/packaging/install.sh"));
+        let out = std::process::Command::new("bash")
+            .args([
+                script.as_os_str(),
+                std::ffi::OsStr::new("_kit-experimental"),
+                std::ffi::OsStr::new(op),
+                conf.as_os_str(),
+                stamp.as_os_str(),
+            ])
+            .output()
+            .expect("run install.sh");
+        assert!(
+            out.status.success(),
+            "install.sh _kit-experimental {op} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn kit_experimental_reverts_only_what_it_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("main.conf");
+        let stamp = dir.path().join("stamp");
+
+        // Pre-existing Experimental = true: apply must not stamp; revert leaves it.
+        write(&conf, "[General]\nExperimental = true\n");
+        kit_experimental("apply", &conf, &stamp);
+        assert!(
+            !stamp.exists(),
+            "must not claim a pre-existing Experimental"
+        );
+        kit_experimental("revert", &conf, &stamp);
+        assert!(
+            experimental_from_text(&fs::read_to_string(&conf).unwrap()),
+            "pre-existing Experimental = true must survive revert"
+        );
+
+        // Kit-introduced: apply stamps; revert removes the line.
+        write(&conf, "[General]\nAutoEnable = true\n");
+        kit_experimental("apply", &conf, &stamp);
+        assert!(stamp.exists());
+        assert!(experimental_from_text(&fs::read_to_string(&conf).unwrap()));
+        kit_experimental("revert", &conf, &stamp);
+        assert!(!stamp.exists());
+        assert!(
+            !experimental_from_text(&fs::read_to_string(&conf).unwrap()),
+            "kit-set Experimental must be reverted"
+        );
+
+        // Kit flipped false → true: revert restores false.
+        write(&conf, "[General]\nExperimental = false\n");
+        kit_experimental("apply", &conf, &stamp);
+        assert_eq!(fs::read_to_string(&stamp).unwrap().trim(), "changed");
+        assert!(experimental_from_text(&fs::read_to_string(&conf).unwrap()));
+        kit_experimental("revert", &conf, &stamp);
+        let text = fs::read_to_string(&conf).unwrap();
+        assert!(!experimental_from_text(&text));
+        assert!(
+            text.lines()
+                .any(|l| l.contains("Experimental") && l.contains("false")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn kit_files_list_did_not_grow() {
+        let mk = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Makefile"));
+        let start = mk.find("KIT_FILES :=").expect("KIT_FILES");
+        let rest = &mk[start..];
+        let end = rest.find("\nDEST").unwrap_or(rest.len());
+        let block = &rest[..end];
+        for name in [
+            "packaging/install.sh",
+            "packaging/catprinter.service",
+            "packaging/catprinter-queue.service",
+            "packaging/env.example",
+            "packaging/80-catprinter.preset",
+            "packaging/61-catprinter-btusb.rules",
+        ] {
+            assert!(block.contains(name), "missing {name} in {block}");
+        }
+        assert!(
+            !block.contains("adopt") && !block.contains("doctor"),
+            "kit must not grow extra install artifacts: {block}"
+        );
+        let files = block.matches("packaging/").count();
+        assert_eq!(files, 6, "KIT_FILES grew: {block}");
+    }
 }

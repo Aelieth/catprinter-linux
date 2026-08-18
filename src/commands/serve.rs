@@ -74,6 +74,12 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let shutdown = CancellationToken::new();
 
     // ---- printer
+    let state_dir = args
+        .state_dir
+        .clone()
+        .or_else(|| std::env::var_os("STATE_DIRECTORY").map(std::path::PathBuf::from));
+    let adopted = state_dir.as_deref().and_then(crate::adopt::load);
+    let device_hint = args.ble.device.clone().or(adopted);
     let printer = match &args.fake_printer {
         Some(dir) => {
             tracing::warn!("FAKE PRINTER: jobs are written to {}", dir.display());
@@ -82,14 +88,27 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                     .with_context(|| format!("fake printer dir {}", dir.display()))?,
             )
         }
-        None => Printer::Ble(crate::ble::BlePrinter {
-            device_hint: args.ble.device.clone(),
-            adapter: args.ble.adapter.clone(),
-            forced_family: args.ble.model.family(),
-            slow: args.ble.slow,
-            pacing_ms: args.ble.pacing_ms,
-            notify_mode: args.ble.notify_mode,
-        }),
+        None => {
+            if args.ble.device.is_none() {
+                if let Some(mac) = device_hint.as_deref() {
+                    tracing::info!(%mac, "using adopted printer");
+                }
+            }
+            if !crate::ble::host::collect_default().experimental {
+                tracing::error!(
+                    "ConnectDevice is missing — BlueZ Experimental is off; printing cannot force LE. An adult needs to run: sudo ./install.sh update"
+                );
+            }
+            Printer::Ble(crate::ble::BlePrinter {
+                device_hint,
+                adapter: args.ble.adapter.clone(),
+                forced_family: args.ble.model.family(),
+                slow: args.ble.slow,
+                pacing_ms: args.ble.pacing_ms,
+                notify_mode: args.ble.notify_mode,
+                state_dir: state_dir.clone(),
+            })
+        }
     };
     let is_fake = printer.is_fake();
 
@@ -106,10 +125,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         max_copies: args.max_copies.max(1),
         render,
         limits: crate::raster::Limits::default(),
-        state_dir: args
-            .state_dir
-            .clone()
-            .or_else(|| std::env::var_os("STATE_DIRECTORY").map(std::path::PathBuf::from)),
+        state_dir,
         ..EngineConfig::default()
     };
     let (engine, worker) = Engine::start(cfg, printer, shutdown.clone());

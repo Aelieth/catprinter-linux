@@ -11,6 +11,7 @@ pub mod seqpacket;
 pub mod session;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -80,11 +81,24 @@ pub struct BlePrinter {
     pub slow: bool,
     pub pacing_ms: u64,
     pub notify_mode: NotifyMode,
+    /// When set, the first successful live connect records the MAC here (auto-adopt).
+    pub state_dir: Option<PathBuf>,
 }
 
 impl BlePrinter {
     fn hint(&self) -> Option<DeviceHint> {
         self.device_hint.as_deref().map(DeviceHint::parse)
+    }
+
+    fn record_adopted(&self, address: &str) {
+        let Some(dir) = &self.state_dir else {
+            return;
+        };
+        match crate::adopt::persist_if_empty(dir, address) {
+            Ok(Some(mac)) => tracing::info!(%mac, "recorded adopted printer"),
+            Ok(None) => {}
+            Err(e) => tracing::debug!("could not record adopted printer: {e}"),
+        }
     }
 
     async fn connect_to(
@@ -186,6 +200,7 @@ impl BlePrinter {
                 .await
             {
                 Ok(s) => {
+                    self.record_adopted(&best.address);
                     scan_guard.armed = false;
                     discovery::stop_scan(conn, &adapter.path).await;
                     return Ok(s);
@@ -251,6 +266,11 @@ impl BlePrinter {
                     note_not_cat_printer(&target.address);
                     // Nothing else in range → NotFound, which the engine retries.
                     result = Err(PrintError::NotFound);
+                }
+                Ok(s) => {
+                    self.record_adopted(&target.address);
+                    result = Ok(s);
+                    break;
                 }
                 r => {
                     result = r;

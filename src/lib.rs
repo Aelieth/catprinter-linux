@@ -6,11 +6,13 @@
 //!         → printer { Ble(models over ble) | Fake }
 //!   dnssd (Avahi on loopback), cupsq (adopt the CUPS queue's printer-uuid)
 
+pub mod adopt;
 pub mod ble;
 pub mod commands;
 pub mod config;
 pub mod cupsq;
 pub mod dnssd;
+pub mod doctor;
 pub mod engine;
 pub mod http;
 pub mod ipp;

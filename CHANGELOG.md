@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.6 — 2026-08-17
+
+Setup and lifecycle surface so an integrator does not reimplement BlueZ
+dance in bash.
+
+- `catprinterd adopt` / `adopt --device` / `adopt --status`: discover (or
+  pin) the printer, force an LE-only BlueZ object via `ConnectDevice`,
+  set `Trusted`, persist the MAC under `$STATE_DIRECTORY` (DynamicUser
+  cannot write `/etc`). First successful live connect records the MAC
+  automatically. Printer off → non-zero, "switch it on and re-run".
+- `catprinterd doctor` / `doctor --json`: adopted/trusted-LE, LE vs
+  Classic, `ConnectDevice`/`Experimental`, queue/port, daemon-up,
+  adapter power/block/autosuspend. Stale BlueZ RSSI is omitted.
+- `install.sh uninstall` reverts only kit-set `Experimental` and the
+  adopted trusted record. `install.sh status --json` is
+  machine-readable; exit 0 only when healthy. No new kit files.
+- Refused jobs (oversize / over-`max_pages` / unwritable
+  `--fake-printer` dest) log at **error** and finish aborted, not
+  completed-successfully.
+
 ## 0.2.5 — 2026-08-17
 
 Hardware report on 0.2.4 (MT7925, BlueZ 5.87, MXW01): `Device1.Connect()`

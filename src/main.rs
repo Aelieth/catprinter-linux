@@ -25,6 +25,8 @@ fn main() {
             Cmd::Print(a) => catprinterd::commands::print(a).await,
             Cmd::Inspect { file } => catprinterd::commands::inspect(&file).await,
             Cmd::EnsureQueue(a) => catprinterd::commands::ensure_queue(a).await,
+            Cmd::Adopt(a) => catprinterd::commands::adopt(a).await,
+            Cmd::Doctor(a) => catprinterd::commands::doctor(a).await,
         };
         // Let best-effort Bluetooth cleanup (Disconnect / StopDiscovery spawned from Drop impls)
         // finish before the runtime goes away, or a held LE link outlives the process.

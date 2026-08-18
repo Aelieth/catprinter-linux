@@ -111,12 +111,17 @@ pub async fn run(args: PrintArgs) -> i32 {
         copies: args.copies.max(1),
     };
     let mut printer = Printer::Ble(BlePrinter {
-        device_hint: args.ble.device.clone(),
+        device_hint: args
+            .ble
+            .device
+            .clone()
+            .or_else(|| crate::adopt::load(&crate::adopt::resolve_store_dir(None))),
         adapter: args.ble.adapter.clone(),
         forced_family: args.ble.model.family(),
         slow: args.ble.slow,
         pacing_ms: args.ble.pacing_ms,
         notify_mode: args.ble.notify_mode,
+        state_dir: Some(crate::adopt::resolve_store_dir(None)),
     });
     let cancel = CancellationToken::new();
     // First Ctrl-C cancels cooperatively (print() observes it during scan/connect too and the

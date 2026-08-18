@@ -25,7 +25,8 @@ pub struct FakePrinter {
 impl FakePrinter {
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        // Serve must start even if the dest is not writable; print fails the job loudly.
+        let _ = std::fs::create_dir_all(&dir);
         Ok(FakePrinter {
             dir,
             family: Family::Mxw01,
@@ -148,8 +149,21 @@ impl FakePrinter {
         }
         let slug = slugify(&job.name);
         let png = self.dir.join(format!("job-{}-{}.png", job.id, slug));
-        write_png(&png, &packed.preview)?;
-        let _ = std::fs::copy(&png, self.dir.join("last.png"));
+        if let Err(e) = write_png(&png, &packed.preview) {
+            tracing::error!(
+                job = job.id,
+                path = %png.display(),
+                "refused job: fake printer could not write: {e}"
+            );
+            return Err(e);
+        }
+        if let Err(e) = std::fs::copy(&png, self.dir.join("last.png")) {
+            tracing::error!(
+                job = job.id,
+                "refused job: fake printer could not write last.png: {e}"
+            );
+            return Err(PrintError::Io(e));
+        }
         let meta = serde_json::json!({
             "id": job.id,
             "name": job.name,
@@ -165,10 +179,15 @@ impl FakePrinter {
             "pages": job.strip.pages,
             "png": png.file_name().map(|s| s.to_string_lossy().to_string()),
         });
-        std::fs::write(
-            self.dir.join(format!("job-{}.json", job.id)),
-            serde_json::to_vec_pretty(&meta).unwrap(),
-        )?;
+        let json_path = self.dir.join(format!("job-{}.json", job.id));
+        if let Err(e) = std::fs::write(&json_path, serde_json::to_vec_pretty(&meta).unwrap()) {
+            tracing::error!(
+                job = job.id,
+                path = %json_path.display(),
+                "refused job: fake printer could not write: {e}"
+            );
+            return Err(PrintError::Io(e));
+        }
         progress(Progress {
             phase: Phase::Finishing,
             percent: 100,

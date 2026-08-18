@@ -38,6 +38,10 @@ pub enum Cmd {
     Inspect { file: PathBuf },
     /// (root) Ensure the CUPS queue exists and points at this daemon (`lpadmin -m everywhere`).
     EnsureQueue(EnsureQueueArgs),
+    /// Discover the printer, force an LE-only BlueZ object, Trust it, remember the MAC.
+    Adopt(AdoptArgs),
+    /// Report whether a connect would go LE, whether the queue/daemon/adapter are ready.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -159,6 +163,40 @@ pub enum OnOff {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct AdoptArgs {
+    /// Printer MAC (or advertised name). Omit to pick the first cat printer that advertises.
+    #[arg(long, env = "CATPRINTER_DEVICE")]
+    pub device: Option<String>,
+    /// Print whether a printer is adopted on this host (no scan).
+    #[arg(long, default_value_t = false)]
+    pub status: bool,
+    /// Drop the persisted MAC and remove the trusted BlueZ record (used by uninstall).
+    #[arg(long, default_value_t = false)]
+    pub forget: bool,
+    /// Bluetooth adapter (hci0, hci1, …).
+    #[arg(long, env = "CATPRINTER_ADAPTER")]
+    pub adapter: Option<String>,
+    /// Directory for the adopted-MAC file (default: `$STATE_DIRECTORY` / `/var/lib/catprinter`).
+    #[arg(long, env = "CATPRINTER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DoctorArgs {
+    /// Emit JSON instead of a table (integrator-parseable).
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+    #[arg(long, env = "CATPRINTER_PORT", default_value_t = 8095)]
+    pub port: u16,
+    #[arg(long, env = "CATPRINTER_QUEUE", default_value = "CatPrinter")]
+    pub queue: String,
+    #[arg(long, env = "CATPRINTER_ADAPTER")]
+    pub adapter: Option<String>,
+    #[arg(long, env = "CATPRINTER_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct CheckArgs {
     #[arg(long, env = "CATPRINTER_PORT", default_value_t = 8095)]
     pub port: u16,
@@ -272,5 +310,34 @@ mod tests {
             "4000"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn adopt_and_doctor_flags_parse() {
+        match parse(&["adopt", "--status"]).unwrap().cmd {
+            Some(Cmd::Adopt(a)) => {
+                assert!(a.status);
+                assert!(!a.forget);
+                assert!(a.device.is_none());
+            }
+            other => panic!("expected adopt --status, got {other:?}"),
+        }
+        match parse(&["adopt", "--device", "AA:BB:CC:DD:EE:FF"])
+            .unwrap()
+            .cmd
+        {
+            Some(Cmd::Adopt(a)) => {
+                assert_eq!(a.device.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+                assert!(!a.status);
+            }
+            other => panic!("expected adopt --device, got {other:?}"),
+        }
+        match parse(&["doctor", "--json"]).unwrap().cmd {
+            Some(Cmd::Doctor(a)) => {
+                assert!(a.json);
+                assert_eq!(a.port, 8095);
+            }
+            other => panic!("expected doctor --json, got {other:?}"),
+        }
     }
 }

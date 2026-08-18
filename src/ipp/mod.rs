@@ -307,6 +307,7 @@ impl IppService {
     }
 
     fn submit_error(&self, req: &Request, e: SubmitError) -> Resp {
+        tracing::error!("refused job: {e}");
         let (status, msg) = match e {
             SubmitError::Busy(_) | SubmitError::NotAccepting => {
                 (Status::ServerErrorBusy, "printer is busy, try again")

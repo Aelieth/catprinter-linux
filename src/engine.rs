@@ -398,13 +398,19 @@ impl Engine {
     fn validate_doc(&self, doc: &Bytes) -> Result<DocFormat, SubmitError> {
         let max = self.store().cfg.max_document_bytes;
         if doc.len() > max {
-            return Err(SubmitError::TooLarge(doc.len()));
+            let e = SubmitError::TooLarge(doc.len());
+            tracing::error!("refused job: {e}");
+            return Err(e);
         }
         if doc.is_empty() {
+            tracing::error!("refused job: empty document");
             return Err(SubmitError::Empty);
         }
         match DocFormat::sniff(doc) {
-            DocFormat::Unknown => Err(SubmitError::BadFormat),
+            DocFormat::Unknown => {
+                tracing::error!("refused job: document format not supported");
+                Err(SubmitError::BadFormat)
+            }
             f => Ok(f),
         }
     }
@@ -738,6 +744,7 @@ async fn run_job(
     let (strip, pages) = match prep {
         Ok(Ok(Ok(v))) => v,
         Ok(Ok(Err(msg))) => {
+            tracing::error!(job = id, "refused job: {msg}");
             let mut s = lock();
             let up = s.uptime();
             s.finish(id, JobState::Aborted, &["document-format-error"], msg);
@@ -943,7 +950,11 @@ async fn run_job(
             s.view.set(up, PrinterState::Idle, &[], "");
         }
         Err(e) => {
-            tracing::warn!(job = id, "job failed: {e}");
+            if matches!(e, PrintError::Render(_) | PrintError::Io(_)) {
+                tracing::error!(job = id, "refused job: {e}");
+            } else {
+                tracing::warn!(job = id, "job failed: {e}");
+            }
             let (reasons, sticky_reasons): (&[&str], &[&str]) = match &e {
                 PrintError::NotFound
                 | PrintError::ConnectFailed { .. }
@@ -1419,5 +1430,106 @@ mod tests {
         let r3 = rig(cfg(), "ok");
         let d = r3.engine.create_job(opts("d"), Some(raster())).unwrap();
         assert!(d >= a);
+    }
+
+    #[derive(Clone)]
+    struct Cap(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Cap {
+        type Writer = CapW;
+        fn make_writer(&'a self) -> Self::Writer {
+            CapW(self.0.clone())
+        }
+    }
+    struct CapW(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CapW {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn over_max_pages_is_aborted_not_completed() {
+        let cap = Cap(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let logged = cap.0.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(cap)
+            .with_max_level(tracing::Level::ERROR)
+            .with_target(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        let r = rig(
+            EngineConfig {
+                limits: crate::raster::Limits {
+                    max_pages: 0,
+                    ..crate::raster::Limits::default()
+                },
+                ..cfg()
+            },
+            "ok",
+        );
+        let id = r.engine.create_job(opts("long"), Some(raster())).unwrap();
+        let j = wait_terminal(&r.engine, id, Duration::from_secs(10)).await;
+        let text = String::from_utf8_lossy(&logged.lock().unwrap()).into_owned();
+        assert!(
+            text.contains("refused job"),
+            "error-level refuse log missing: {text}"
+        );
+        assert_eq!(j.state, JobState::Aborted);
+        assert!(
+            !j.reasons.contains(&"job-completed-successfully"),
+            "{:?}",
+            j.reasons
+        );
+        assert_eq!(j.reasons, vec!["document-format-error"]);
+        assert!(
+            j.message.contains("page") || j.message.contains("pages"),
+            "{}",
+            j.message
+        );
+        assert!(
+            !r.dir.path().join(format!("job-{id}.json")).exists(),
+            "refused job must not write a success artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn unwritable_fake_dest_fails_job() {
+        let cap = Cap(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let logged = cap.0.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(cap)
+            .with_max_level(tracing::Level::ERROR)
+            .with_target(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        let dest = tempfile::tempdir().unwrap();
+        let not_a_dir = dest.path().join("blocked");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let printer = Printer::Fake(FakePrinter::new(&not_a_dir).unwrap());
+        let shutdown = CancellationToken::new();
+        let (engine, _worker) = Engine::start(cfg(), printer, shutdown);
+        let id = engine.create_job(opts("nope"), Some(raster())).unwrap();
+        let j = wait_terminal(&engine, id, Duration::from_secs(10)).await;
+        let text = String::from_utf8_lossy(&logged.lock().unwrap()).into_owned();
+        assert!(
+            text.contains("refused job") && text.contains("fake printer could not write"),
+            "error-level write failure missing: {text}"
+        );
+        assert_eq!(j.state, JobState::Aborted);
+        assert!(
+            !j.reasons.contains(&"job-completed-successfully"),
+            "{:?}",
+            j.reasons
+        );
+        let pngs: Vec<_> = std::fs::read_dir(dest.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+            .collect();
+        assert!(pngs.is_empty(), "no success PNG on an unwritable dest");
     }
 }

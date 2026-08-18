@@ -2,9 +2,13 @@
 
 use std::path::Path;
 
-use crate::config::{BleArgs, CheckArgs, EnsureQueueArgs, PrintArgs, ServeArgs};
+use crate::config::{
+    AdoptArgs, BleArgs, CheckArgs, DoctorArgs, EnsureQueueArgs, PrintArgs, ServeArgs,
+};
 
+pub mod adopt;
 pub mod check;
+pub mod doctor;
 pub mod print;
 pub mod serve;
 pub mod status;
@@ -60,4 +64,12 @@ pub mod ensure_queue;
 
 pub async fn ensure_queue(args: EnsureQueueArgs) -> i32 {
     ensure_queue::ensure_queue(args).await
+}
+
+pub async fn adopt(args: AdoptArgs) -> i32 {
+    adopt::run(args).await
+}
+
+pub async fn doctor(args: DoctorArgs) -> i32 {
+    doctor::run(args).await
 }

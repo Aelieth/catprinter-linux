@@ -5,10 +5,12 @@
 #   sudo ./install.sh update               swap binary + restart (same as install; must be installed)
 #   sudo ./install.sh uninstall [--purge]  remove queue, units, files (keep /etc/catprinter unless --purge)
 #   ./install.sh status                    show units, health, queue (no root needed except journal)
+#   ./install.sh status --json             same facts as JSON (exit 0 only when healthy)
 #   flags: --binary PATH    use this catprinterd instead of ./catprinterd
 #          --download [TAG] fetch the kit tarball from GitHub Releases (latest or vX.Y.Z; default
 #                           latest), verify it against SHA256SUMS
 #          --yes            no confirmation prompts
+#          --json           with status: machine-readable JSON (do not parse the prose table)
 #
 # Immutable-first: nothing is layered into rpm-ostree and nothing outside /usr/local (= /var/usrlocal,
 # writable and persistent) and /etc is touched. Runtime deps are base-image packages only:
@@ -38,7 +40,13 @@ SRC_BIN=""
 DOWNLOAD=""
 PURGE=0
 YES=0
+STATUS_JSON=0
+KIT_EXP_OP=""
+KIT_EXP_CONF=""
+KIT_EXP_STAMP=""
 TMPD=""
+KIT_EXP_STAMP_DEFAULT=/etc/catprinter/kit-set-experimental
+BLUEZ_CONF_DEFAULT=/etc/bluetooth/main.conf
 
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*" >&2; }
@@ -53,10 +61,18 @@ trap cleanup EXIT
 while [[ $# -gt 0 ]]; do
   case "$1" in
     install|update|uninstall|status) CMD=$1 ;;
+    _kit-experimental)
+      CMD=$1
+      KIT_EXP_OP=${2:-}
+      KIT_EXP_CONF=${3:-}
+      KIT_EXP_STAMP=${4:-}
+      break
+      ;;
     --binary)   SRC_BIN=${2:?--binary needs a path}; shift ;;
     --download) DOWNLOAD=latest; if [[ ${2:-} == v* || ${2:-} == latest ]]; then DOWNLOAD=$2; shift; fi ;;
     --purge)    PURGE=1 ;;
     --yes|-y)   YES=1 ;;
+    --json)     STATUS_JSON=1 ;;
     -h|--help)  sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -150,10 +166,57 @@ do_status() {
   return $rc
 }
 
-if [[ $CMD == status ]]; then do_status; exit $?; fi
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/ }
+  printf '%s' "$s"
+}
 
-# ---- everything below needs root ------------------------------------------------------------------
-[[ $EUID -eq 0 ]] || die "run as root: sudo $0 $CMD"
+do_status_json() {
+  local rc=0 mode u active enabled health queue_state default_q
+  mode=$(install_mode)
+  echo '{'
+  printf '  "mode": "%s",\n' "$(json_str "$mode")"
+  printf '  "port": %s,\n' "$PORT"
+  printf '  "queue": "%s",\n' "$(json_str "$QUEUE")"
+  echo '  "units": {'
+  local first=1
+  for u in "${UNITS[@]}"; do
+    active=$(systemctl is-active "$u" 2>/dev/null || true)
+    enabled=$(systemctl is-enabled "$u" 2>/dev/null || true)
+    systemctl is-active --quiet "$u" 2>/dev/null || rc=1
+    if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
+    printf '    "%s": {"active":"%s","enabled":"%s"}' "$(json_str "$u")" "$(json_str "$active")" "$(json_str "$enabled")"
+  done
+  echo
+  echo '  },'
+  if curl -fsS --max-time 3 "$HEALTH" >/dev/null 2>&1; then health=up; else health=down; rc=1; fi
+  printf '  "health": "%s",\n' "$health"
+  if lpstat -v "$QUEUE" >/dev/null 2>&1; then queue_state=present; else queue_state=missing; rc=1; fi
+  printf '  "queue_present": %s,\n' "$([[ $queue_state == present ]] && echo true || echo false)"
+  default_q=$(lpstat -d 2>/dev/null | awk '{print $NF}' || true)
+  if [[ $default_q == "$QUEUE" ]]; then printf '  "queue_is_default": true,\n'; else printf '  "queue_is_default": false,\n'; fi
+  if [[ $mode == mixed ]]; then rc=1; fi
+  if [[ $rc -eq 0 ]]; then
+    printf '  "ok": true\n'
+  else
+    printf '  "ok": false\n'
+  fi
+  echo '}'
+  return $rc
+}
+
+if [[ $CMD == status ]]; then
+  if [[ $STATUS_JSON -eq 1 ]]; then do_status_json; else do_status; fi
+  exit $?
+fi
+
+# ---- everything below needs root (except the Experimental text helper used by tests) ----------
+if [[ $CMD != _kit-experimental ]]; then
+  [[ $EUID -eq 0 ]] || die "run as root: sudo $0 $CMD"
+fi
 
 preflight() {
   local c
@@ -268,31 +331,100 @@ ensure_btusb_udev() {
   ok "udev $dest_etc (USB Bluetooth autosuspend off)"
 }
 
-# BlueZ 5.87 hides Adapter1.ConnectDevice unless Experimental is on. That method
-# is how we force LE instead of Classic on MXW01 ads that look dual-mode.
-ensure_bluez_experimental() {
-  local conf=/etc/bluetooth/main.conf tmp
-  mkdir -p /etc/bluetooth
+# Write Experimental = true. Stamp records whether *this kit* introduced it
+# (`added` or `changed`). Pre-existing true leaves no stamp so uninstall
+# will not turn Experimental off for someone else.
+kit_apply_experimental() {
+  local conf=${1:?} stamp=${2:?} tmp
+  mkdir -p "$(dirname "$conf")" "$(dirname "$stamp")"
   if [[ -f $conf ]] && grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$conf"; then
-    ok "BlueZ Experimental already on ($conf)"
     return 0
   fi
   if [[ -f $conf ]] && grep -qE '^[[:space:]]*Experimental[[:space:]]*=' "$conf"; then
+    printf 'changed\n' > "$stamp"
     tmp=$(mktemp)
     sed -E 's/^[[:space:]]*Experimental[[:space:]]*=.*/Experimental = true/' "$conf" > "$tmp"
     install -m 0644 "$tmp" "$conf"
     rm -f "$tmp"
   elif [[ -f $conf ]] && grep -qE '^\[General\]' "$conf"; then
+    printf 'added\n' > "$stamp"
     tmp=$(mktemp)
     awk 'BEGIN{d=0} /^\[General\]/{print; if(!d){print "Experimental = true"; d=1} next} {print} END{if(!d) print "\n[General]\nExperimental = true"}' "$conf" > "$tmp"
     install -m 0644 "$tmp" "$conf"
     rm -f "$tmp"
   else
+    printf 'added\n' > "$stamp"
+    mkdir -p "$(dirname "$conf")"
     printf '\n[General]\nExperimental = true\n' >> "$conf"
   fi
-  systemctl restart bluetooth >/dev/null 2>&1 || warn "restart bluetooth.service after Experimental = true"
+}
+
+# Undo only a kit-introduced Experimental. No stamp → leave main.conf alone.
+kit_revert_experimental() {
+  local conf=${1:?} stamp=${2:?} how tmp
+  [[ -f $stamp ]] || return 0
+  how=$(tr -d '[:space:]' < "$stamp")
+  if [[ -f $conf ]]; then
+    tmp=$(mktemp)
+    case "$how" in
+      changed)
+        sed -E 's/^[[:space:]]*Experimental[[:space:]]*=.*/Experimental = false/' "$conf" > "$tmp"
+        ;;
+      *)
+        grep -vE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$conf" > "$tmp" || true
+        ;;
+    esac
+    install -m 0644 "$tmp" "$conf"
+    rm -f "$tmp"
+  fi
+  rm -f "$stamp"
+}
+
+# BlueZ 5.87 hides Adapter1.ConnectDevice unless Experimental is on. That method
+# is how we force LE instead of Classic on MXW01 ads that look dual-mode.
+ensure_bluez_experimental() {
+  local conf=${BLUEZ_CONF:-$BLUEZ_CONF_DEFAULT}
+  local stamp=${KIT_EXP_STAMP_PATH:-$KIT_EXP_STAMP_DEFAULT}
+  mkdir -p /etc/bluetooth /etc/catprinter
+  if [[ -f $conf ]] && grep -qE '^[[:space:]]*Experimental[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$conf"; then
+    ok "BlueZ Experimental already on ($conf)"
+    return 0
+  fi
+  kit_apply_experimental "$conf" "$stamp"
+  if [[ $conf == /etc/bluetooth/main.conf ]]; then
+    systemctl restart bluetooth >/dev/null 2>&1 || warn "restart bluetooth.service after Experimental = true"
+  fi
   ok "BlueZ Experimental = true in $conf (LE ConnectDevice)"
 }
+
+revert_adopted_record() {
+  local f mac b
+  b=$(installed_bin)
+  mac=""
+  for f in /var/lib/catprinter/adopted /var/lib/private/catprinter/adopted; do
+    if [[ -r $f ]]; then
+      mac=$(head -n1 "$f" | tr -d '[:space:]')
+      break
+    fi
+  done
+  if [[ -x $b ]]; then
+    if [[ -n $mac ]]; then
+      "$b" adopt --forget --device "$mac" >/dev/null 2>&1 || true
+    else
+      "$b" adopt --forget >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f /var/lib/catprinter/adopted /var/lib/private/catprinter/adopted
+}
+
+if [[ $CMD == _kit-experimental ]]; then
+  case "$KIT_EXP_OP" in
+    apply) kit_apply_experimental "$KIT_EXP_CONF" "$KIT_EXP_STAMP" ;;
+    revert) kit_revert_experimental "$KIT_EXP_CONF" "$KIT_EXP_STAMP" ;;
+    *) die "usage: $0 _kit-experimental apply|revert CONF STAMP" ;;
+  esac
+  exit 0
+fi
 
 # A kit-installed machine that rebased onto an image-baked image: the /etc units shadow the image's.
 migrate_kit_off_image() {
@@ -370,6 +502,8 @@ do_uninstall() {
     read -r -p "Remove queue $QUEUE, units and files? [y/N] " a || die "no answer (use --yes)"
     [[ $a == y* || $a == Y* ]] || exit 1
   fi
+  revert_adopted_record
+  kit_revert_experimental "${BLUEZ_CONF:-$BLUEZ_CONF_DEFAULT}" "${KIT_EXP_STAMP_PATH:-$KIT_EXP_STAMP_DEFAULT}"
   b=$(installed_bin)
   if [[ -x $b ]]; then "$b" ensure-queue --remove --queue "$QUEUE" --port "$PORT" >/dev/null 2>&1 || lpadmin -x "$QUEUE" 2>/dev/null || true
   else lpadmin -x "$QUEUE" 2>/dev/null || true; fi
