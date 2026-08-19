@@ -13,9 +13,7 @@ permissions:
 jobs:
   check:
     name: fmt · clippy · tests · install.sh · IPP Everywhere
-    # Same glibc floor as the kits. ubuntu-latest (24.04) has hung twice on
-    # apt-get in the Release kit reusable workflow (unattended-upgrade lock).
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +34,27 @@ jobs:
         run: rustc --version && rustc --version | grep -F " ${{ steps.tc.outputs.channel }}."
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Isolate from the ubuntu-22.04 kit jobs (same lockfile, different profile).
+          shared-key: check
 
       # ipptool + /usr/share/cups/ipptool/*.test come from cups-ipp-utils; no cupsd needed.
+      # GitHub's azure.archive.ubuntu.com mirror has ignored/stalled twice and blocked Publish.
       - name: Install ipptool and shellcheck
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: |
           set -euo pipefail
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cups-ipp-utils shellcheck
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          for i in 1 2 3; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get update -q \
+              && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cups-ipp-utils shellcheck; then
+              exit 0
+            fi
+            echo "apt attempt $i failed; retrying..."
+            sleep 8
+          done
+          exit 1
 
       # CATPRINTER_REQUIRE_IPPTOOL turns the e2e test's "ipptool missing" skips into failures.
       - name: make check (fmt, clippy -D warnings, tests, install.sh, fleet-test.sh, units)
