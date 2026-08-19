@@ -13,7 +13,10 @@ permissions:
 jobs:
   check:
     name: fmt · clippy · tests · install.sh · IPP Everywhere
-    runs-on: ubuntu-latest
+    # Same glibc floor as the kits. ubuntu-latest (24.04) has hung twice on
+    # apt-get in the Release kit reusable workflow (unattended-upgrade lock).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -36,9 +39,11 @@ jobs:
 
       # ipptool + /usr/share/cups/ipptool/*.test come from cups-ipp-utils; no cupsd needed.
       - name: Install ipptool and shellcheck
+        timeout-minutes: 3
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q cups-ipp-utils shellcheck
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cups-ipp-utils shellcheck
 
       # CATPRINTER_REQUIRE_IPPTOOL turns the e2e test's "ipptool missing" skips into failures.
       - name: make check (fmt, clippy -D warnings, tests, install.sh, fleet-test.sh, units)
