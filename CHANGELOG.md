@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.2 — 2026-08-18
+
+Document is a **full A4 / Letter page**, then the daemon shrinks that entire
+raster to 384 dots (~4.4×). 0.3.1 advertised Document at 48 mm × aspect so
+CUPS named the size `48x68mm` (no Document/A4 in the dialog) and apps laid
+out a 48 mm column instead of a homework page.
+
+- **Cat Tape short** (`custom_cat-tape_48x297mm`, default) and **Cat Tape long**
+  — 48 mm roll; trim and fill the head.
+- **Cat Minidoc A4** / **Cat Minidoc Letter** — true `iso_a4_210x297mm`
+  (210×297 mm) and `na_letter_8.5x11in` (8.5×11 in) so LibreOffice/GTK emit a
+  full page. `Layout::Sheet` scales the whole raster to 384 px (title stays at
+  the top, last line at the bottom). Style (Text / Default / Picture) still
+  applies — Minidoc is paper, not a hidden Document preset.
+- printer-strings: `PageSize.A4` / `PageSize.Letter` → Cat Minidoc A4 / Letter;
+  `PageSize.48x297mm` / `48x500mm` → Cat Tape short / Cat Tape long.
+
+Print style and speed: CUPS `black_1` FastGray made Text/Default/Picture look
+identical (already 1-bit), and ColorModel **Gray** default sent every job as
+4 bpp grayscale (slow). Raster type is **`sgray_8` only** so we dither; 4 bpp
+is **Picture + Grayscale** only (the photo path). Default is 1 bpp Black and
+white. Jobs log quality, color-mode, preset, tone, and layout.
+
+`ensure-queue` now installs a **cups-filters `driverless` PPD** (GTK reads
+`Choice/Human name`, not `printer-strings-uri`). CUPS `-m everywhere` left
+Draft/Normal/High, Stationery/Labels, and `48x297mm`. Duplicate
+`Cat_Printer` queues that point at the same loopback URI are removed.
+`print-content-optimize` is no longer advertised (and is stripped from the
+PPD) so GTK does not show a second **Print Optimization** menu with Text /
+Photo / Graphics next to **Print style**.
+
+Minidoc/Sheet trims **left/right** white (not top/bottom) so Gwenview/KDE's
+~0.17 in dialog margins do not shrink type; title stays at the top, last line
+at the bottom. PPD `ImageableArea` / `HWMargins` left and right are forced to 0
+on every page size.
+
+`install.sh update` (or equivalent queue refresh) is required so the
+driverless PPD is regenerated from the new sizes.
+
 ## 0.3.1 — 2026-08-18
 
 Printer-properties: Document A4 / Document Letter are advertised at **48 mm

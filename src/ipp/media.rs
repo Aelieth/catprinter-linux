@@ -2,9 +2,10 @@
 //!
 //! Sizes are in hundredths of a millimetre, as IPP `media-size` wants them.
 //! CUPS's everywhere PPD generator names PageSizes by *dimensions* (`48x297mm`), and turns the
-//! rangeOfInteger entry into `*CustomPageSize`. Margins: left/right 0 (full 384-dot head), top/bottom
-//! 1 mm — with all four at 0 the generator emits `48x297mm.Borderless` choices but a `*DefaultPageSize`
-//! without the suffix (no match); 1 mm keeps the plain names and a matching default.
+//! rangeOfInteger entry into `*CustomPageSize`. Margins: left/right **0** on every size (full
+//! 384-dot head). Top/bottom 1 mm — all four at 0 makes the generator emit `48x297mm.Borderless`
+//! with a `*DefaultPageSize` that does not match. KDE/Gwenview still *defaults* L/R to ~0.17 in
+//! when the hardware min is 0; Sheet layout trims leftover side white.
 
 use crate::ipp::codec::{v_int, v_kw, v_range, Coll};
 use ipp::value::IppValue;
@@ -22,43 +23,36 @@ pub struct MediaSize {
 /// Custom length range for the tape (1 in .. 5 m) at the fixed 48 mm width.
 pub const TAPE_X_HMM: i32 = 4800;
 
-/// ISO A4 / NA Letter *physical* size. Document media is advertised at tape width × this
-/// aspect so CUPS rasterises the whole homework page to 384 dots instead of a 210 mm strip.
-pub const A4_PHYS_X_HMM: i32 = 21000;
-pub const A4_PHYS_Y_HMM: i32 = 29700;
-pub const LETTER_PHYS_X_HMM: i32 = 21590;
-pub const LETTER_PHYS_Y_HMM: i32 = 27940;
-
-/// `round(tape_width × physical_height / physical_width)` in hundredths of a millimetre.
-pub const fn tape_miniature_y_hmm(phys_x_hmm: i32, phys_y_hmm: i32) -> i32 {
-    let n = TAPE_X_HMM as i64 * phys_y_hmm as i64;
-    let d = phys_x_hmm as i64;
-    ((n + d / 2) / d) as i32
-}
+/// True ISO A4 / NA Letter. Document must be advertised at these sizes so the app
+/// emits a full page; `Layout::Sheet` then scales that entire raster to 384 dots.
+pub const A4_X_HMM: i32 = 21000;
+pub const A4_Y_HMM: i32 = 29700;
+pub const LETTER_X_HMM: i32 = 21590;
+pub const LETTER_Y_HMM: i32 = 27940;
 
 pub const TAPE: MediaSize = MediaSize {
     name: "custom_cat-tape_48x297mm",
     x_hmm: TAPE_X_HMM,
     y_hmm: 29700,
-    label: "Cat tape 48 mm",
+    label: "Cat Tape short",
 };
 pub const TAPE_LONG: MediaSize = MediaSize {
     name: "custom_cat-tape-long_48x500mm",
     x_hmm: TAPE_X_HMM,
     y_hmm: 50000,
-    label: "Cat tape long",
+    label: "Cat Tape long",
 };
 pub const A4: MediaSize = MediaSize {
     name: "iso_a4_210x297mm",
-    x_hmm: TAPE_X_HMM,
-    y_hmm: tape_miniature_y_hmm(A4_PHYS_X_HMM, A4_PHYS_Y_HMM),
-    label: "Document A4",
+    x_hmm: A4_X_HMM,
+    y_hmm: A4_Y_HMM,
+    label: "Cat Minidoc A4",
 };
 pub const LETTER: MediaSize = MediaSize {
     name: "na_letter_8.5x11in",
-    x_hmm: TAPE_X_HMM,
-    y_hmm: tape_miniature_y_hmm(LETTER_PHYS_X_HMM, LETTER_PHYS_Y_HMM),
-    label: "Document Letter",
+    x_hmm: LETTER_X_HMM,
+    y_hmm: LETTER_Y_HMM,
+    label: "Cat Minidoc Letter",
 };
 
 pub const ALL: [MediaSize; 4] = [TAPE, TAPE_LONG, A4, LETTER];
@@ -138,8 +132,8 @@ pub struct MediaHint {
 }
 
 impl MediaHint {
-    /// Homework miniature (Document A4 / Letter): selected by PWG/PPD name, not width.
-    /// After we advertise those sizes at 48 mm, width-based tape detection would wrongly trim them.
+    /// Homework miniature: PWG/PPD name (`A4`, `iso_a4_…`) or true A4/Letter dimensions.
+    /// Width > 60 mm is also a sheet (`is_tape` is false). Name/size pick Sheet layout, not a style.
     pub fn is_document(&self) -> bool {
         if self.name.as_deref().is_some_and(is_document_media_name) {
             return true;
@@ -164,6 +158,8 @@ pub fn is_document_media_name(name: &str) -> bool {
         "a4" | "letter" | "iso-a4" | "na-letter" | "iso_a4" | "na_letter"
     ) || l.starts_with("iso_a4_")
         || l.starts_with("na_letter_")
+        || l.starts_with("a4.")
+        || l.starts_with("letter.")
 }
 
 /// Parse a PWG self-describing media name (`custom_cat-tape_48x297mm`, `na_letter_8.5x11in`,
@@ -223,8 +219,11 @@ pub fn strings_en() -> String {
     s.push_str("\"cupsPrintQuality.High\" = \"Picture\";\n");
     s.push_str("\"ColorModel.Gray\" = \"Grayscale\";\n");
     s.push_str("\"ColorModel.FastGray\" = \"Black and white\";\n");
-    s.push_str("\"PageSize.A4\" = \"Document A4\";\n");
-    s.push_str("\"PageSize.Letter\" = \"Document Letter\";\n");
+    s.push_str("\"PageSize.A4\" = \"Cat Minidoc A4\";\n");
+    s.push_str("\"PageSize.Letter\" = \"Cat Minidoc Letter\";\n");
+    // driverless names the roll by millimetres when the PWG name is custom_*.
+    s.push_str("\"PageSize.48x297mm\" = \"Cat Tape short\";\n");
+    s.push_str("\"PageSize.48x500mm\" = \"Cat Tape long\";\n");
     s
 }
 
@@ -263,8 +262,10 @@ mod tests {
             _ => panic!(),
         }
         let s = strings_en();
-        assert!(s.contains("\"media.custom_cat-tape_48x297mm\" = \"Cat tape 48 mm\";"));
-        assert!(s.contains("\"media.iso_a4_210x297mm\" = \"Document A4\";"));
+        assert!(s.contains("\"media.custom_cat-tape_48x297mm\" = \"Cat Tape short\";"));
+        assert!(s.contains("\"media.iso_a4_210x297mm\" = \"Cat Minidoc A4\";"));
+        assert!(s.contains("\"PageSize.A4\" = \"Cat Minidoc A4\";"));
+        assert!(s.contains("\"PageSize.48x297mm\" = \"Cat Tape short\";"));
         assert!(s.contains("\"print-quality.4\" = \"Default\";"));
         assert!(s.contains("\"print-quality.5\" = \"Picture\";"));
         assert!(s.contains("\"print-color-mode.bi-level\" = \"Black and white\";"));
@@ -287,21 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn document_pages_are_tape_width_with_a4_letter_aspect() {
-        assert_eq!(A4.x_hmm, TAPE_X_HMM);
-        assert_eq!(LETTER.x_hmm, TAPE_X_HMM);
-        assert_eq!(A4.x_hmm, 4800);
-        // Advertised height is the tape miniature (within 1 mm of the physical aspect).
-        let a4_y = tape_miniature_y_hmm(A4_PHYS_X_HMM, A4_PHYS_Y_HMM);
-        let letter_y = tape_miniature_y_hmm(LETTER_PHYS_X_HMM, LETTER_PHYS_Y_HMM);
-        assert_eq!(A4.y_hmm, a4_y);
-        assert_eq!(LETTER.y_hmm, letter_y);
-        assert!(A4.y_hmm.abs_diff(6789) <= 100, "A4 y={}", A4.y_hmm);
-        assert!(
-            LETTER.y_hmm.abs_diff(6212) <= 100,
-            "Letter y={}",
-            LETTER.y_hmm
-        );
+    fn document_pages_are_physical_a4_and_letter() {
+        assert_eq!((A4.x_hmm, A4.y_hmm), (A4_X_HMM, A4_Y_HMM));
+        assert_eq!((LETTER.x_hmm, LETTER.y_hmm), (LETTER_X_HMM, LETTER_Y_HMM));
+        assert_eq!(A4.x_hmm, 21000);
+        assert_eq!(LETTER.x_hmm, 21590);
+        assert_eq!(A4.y_hmm, 29700);
+        assert_eq!(LETTER.y_hmm, 27940);
         match media_col(Some(&A4)) {
             IppValue::Collection(c) => {
                 let size = c
@@ -320,8 +313,8 @@ mod tests {
                             _ => None,
                         })
                 };
-                assert_eq!(get("x-dimension"), Some(A4.x_hmm));
-                assert_eq!(get("y-dimension"), Some(A4.y_hmm));
+                assert_eq!(get("x-dimension"), Some(21000));
+                assert_eq!(get("y-dimension"), Some(29700));
             }
             other => panic!("{other:?}"),
         }
@@ -330,11 +323,16 @@ mod tests {
             y_hmm: A4.y_hmm,
             name: Some(A4.name.into()),
         };
-        assert!(
-            a4.is_document(),
-            "named Document A4 at 48 mm is still Document"
-        );
-        assert!(!a4.is_tape(), "must not trim homework as tape");
+        assert!(a4.is_document());
+        assert!(!a4.is_tape());
+        // CUPS often sends media-col size with no media-size-name.
+        let unnamed = MediaHint {
+            x_hmm: 21000,
+            y_hmm: 29700,
+            name: None,
+        };
+        assert!(unnamed.is_document(), "true A4 dimensions are Document");
+        assert!(!unnamed.is_tape());
         let letter = MediaHint {
             x_hmm: LETTER.x_hmm,
             y_hmm: LETTER.y_hmm,
@@ -350,6 +348,8 @@ mod tests {
         assert!(!tape.is_document());
         assert!(is_document_media_name("iso_a4_210x297mm"));
         assert!(is_document_media_name("A4"));
+        assert!(is_document_media_name("A4.Borderless"));
+        assert!(is_document_media_name("Letter.Borderless"));
         assert!(!is_document_media_name("custom_cat-tape_48x297mm"));
     }
 }

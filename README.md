@@ -37,7 +37,7 @@ sudo ./install.sh update       # swap binary, restart, regenerate the CUPS PPD
 sudo ./install.sh uninstall    # remove queue + units (+ --purge for /etc/catprinter)
 ```
 
-What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon, `DynamicUser`, hardened, `Type=notify`) and `catprinter-queue.service` (a root oneshot that runs `lpadmin -p CatPrinter -m everywhere …` at every boot so the queue self-heals), creates `/etc/catprinter/env`, installs a udev rule so combo Wi-Fi/Bluetooth cards don’t nap mid-Connect (`61-catprinter-btusb.rules`), turns on BlueZ `Experimental = true` so we can force an **LE** connect (MXW01 ads look dual-mode; Classic `Connect` never talks to the printer), and prints a status table. Old per-user `mxw01d` units are removed.
+What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon, `DynamicUser`, hardened, `Type=notify`) and `catprinter-queue.service` (a root oneshot that runs `lpadmin` with a driverless PPD at every boot so the queue self-heals), creates `/etc/catprinter/env`, installs a udev rule so combo Wi-Fi/Bluetooth cards don’t nap mid-Connect (`61-catprinter-btusb.rules`), turns on BlueZ `Experimental = true` so we can force an **LE** connect (MXW01 ads look dual-mode; Classic `Connect` never talks to the printer), and prints a status table. Old per-user `mxw01d` units are removed.
 
 **Image-baked (custom uBlue / ostree image):** `make image-files DEST=<rootfs>` drops the same files into `/usr/bin`, `/usr/lib/systemd/system`, the `etc/systemd/system/multi-user.target.wants/` symlinks (so they are enabled at build time), a system-preset, `/usr/lib/udev/rules.d/61-catprinter-btusb.rules`, and `/usr/lib/catprinter/{VERSION,install.sh,env.example}`. Containerfile: `COPY image-root/ /`. Zero per-machine steps on first boot and on every rebase. On such a machine `install.sh` only manages `/etc/catprinter/env` and unit state; the image always wins. See [packaging/KIT-README.md](packaging/KIT-README.md).
 
@@ -47,13 +47,13 @@ Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPR
 
 | Setting | Choices | What happens |
 |---|---|---|
-| Media / paper size | **Cat tape 48 mm** (default), Cat tape long, **Document A4**, Document Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Document A4/Letter: 48 mm × A4/Letter aspect so CUPS shrinks the *whole* homework page to 384 dots (no trim, not a left strip). |
-| Print quality | **Default** (drawings), Text (sharp), Picture (photos / crayon) | style only — dither and heat. Does **not** pick grayscale. |
-| Color / tone | **Black and white** (default), Grayscale | 1-bit vs 16-level burn on the MXW01. Picture + Grayscale is the photo path. |
+| Media / paper size | **Cat Tape short** (default), Cat Tape long, **Cat Minidoc A4**, Cat Minidoc Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Minidoc: the app emits a full A4/Letter page; we scale that *entire* page to 384 dots (~4.4×), trimming leftover **left/right** white only (title stays at the top, last line at the bottom). |
+| Print quality | **Default** (drawings), Text (sharp glyphs), Picture (hotter dither) | style only — dither and heat. Works on Cat Tape and Cat Minidoc. |
+| Color / tone | **Black and white** (default, fast 1-bit), Grayscale | 16-level burn only for **Picture + Grayscale** (the photo path; slower). |
 | Paper type | **Paper**, Sticker | Label only. Same heat. |
 | Copies, n-up, landscape | as usual | CUPS handles them |
 
-Kids: paint → Cat tape + Default. Photos → Picture + Grayscale. LibreOffice → **Document A4**.  
+Kids: paint → Cat Tape short + Default + Black and white. Photos → **Picture + Grayscale**. LibreOffice → **Cat Minidoc A4** (style still Text/Default/Picture).  
 Never make CatPrinter the *default* printer (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
 
 The old Python-era contract is in [original-settings.md](original-settings.md).
@@ -84,7 +84,7 @@ cargo run -- serve --port 8096 --fake-printer /tmp/fake --dnssd off     # no har
 ipptool -V 2.0 -tI -f tests/fixtures/text-roll48.pwg -d filetype=image/pwg-raster \
         ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/ipp-everywhere.test
 driverless ipp://127.0.0.1:8096/ipp/print      # the PPD CUPS would generate
-lpadmin -p CatTest -E -v ipp://127.0.0.1:8096/ipp/print -m everywhere && lp -d CatTest file.pdf
+lpadmin -p CatTest -E -v ipp://127.0.0.1:8096/ipp/print -P <(driverless ipp://127.0.0.1:8096/ipp/print) && lp -d CatTest file.pdf
 cargo run -- print media/hackoclock.jpg -q picture --tone grayscale    # straight to the printer over BLE
 cargo run -- print file.png --preview-only out.png # render only
 ```

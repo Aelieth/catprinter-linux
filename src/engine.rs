@@ -725,6 +725,7 @@ async fn run_job(
     // ---- stage 1: decode + prepare (blocking, bounded)
     let render_opts = opts.render_options(&cfg.render, format == DocFormat::Image);
     let limits = cfg.limits;
+    let render_for_prep = render_opts.clone();
     let prep = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || -> Result<(render::GrayStrip, u32), String> {
@@ -736,7 +737,7 @@ async fn run_job(
                 DocFormat::Unknown => return Err("unsupported document format".into()),
             };
             let n = pages.len() as u32;
-            let strip = render::prepare(pages, &render_opts).map_err(|e| e.to_string())?;
+            let strip = render::prepare(pages, &render_for_prep).map_err(|e| e.to_string())?;
             Ok((strip, n))
         }),
     )
@@ -786,6 +787,17 @@ async fn run_job(
             j.preview = Some(Arc::new(strip.as_page()));
         }
     }
+    tracing::info!(
+        job = id,
+        quality = opts.print_quality,
+        color_mode = %opts.color_mode,
+        preset = render_opts.preset.name(),
+        tone = render_opts.tone.name(),
+        layout = ?strip.layout,
+        pages,
+        strip = format_args!("{}x{}", strip.width, strip.height),
+        "prepared print"
+    );
     let job = PreparedJob {
         id,
         name: opts.job_name.clone(),

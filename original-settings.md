@@ -35,11 +35,16 @@ full A4 (or Letter) page, then we scale that *entire* page to 384 px
 PPD: `CatQuality Document` ran `setpagedevice` A4, and UIConstraints
 forbade combining Document with Roll48 / Roll48Long.
 
-**In the remade driver (no vendor PPD):** pick paper size **Document A4**
-or **Document Letter**. Those sizes are advertised at 48 mm × A4/Letter
-aspect so CUPS rasterises the whole page to 384 dots (true 210 mm A4
-produced a left strip). Media-size-name selects the Document preset
-(threshold, no trim, `0x68`) even at tape width.
+**In the remade driver (no vendor PPD):** pick paper size **Cat Minidoc A4**
+or **Cat Minidoc Letter** (kid labels; CUPS may still show A4 / Letter). Those
+sizes are advertised at **true** A4 / Letter (595×842 pt / 612×792 pt) so
+the app emits a full page. The daemon then scales that *entire* raster to
+384 px (`Layout::Sheet`, ~4.4×). Minidoc is paper size only: quality 3/4/5
+still pick Text / Default / Picture (no hidden Document preset). Roll media
+is labelled **Cat Tape short** / **Cat Tape long**. Do **not** advertise
+Minidoc at 48 mm page size — CUPS then names it `48x68mm` and apps lay out a
+skinny column, not a page. CUPS must send **8-bit** gray (`sgray_8`); a
+`black_1` FastGray raster is already binary and our dither cannot change it.
 
 ### Tone — `CatTone` (orthogonal)
 
@@ -54,7 +59,9 @@ Picture + Grayscale was the quality photo path (hackoclock used all 16
 levels). Text/Document + Grayscale kept glyphs solid.
 
 **In the remade driver:** IPP `print-color-mode` `bi-level` = Black and
-white, `monochrome` = Grayscale. Print quality must **not** force tone.
+white (1 bpp). `monochrome` is 4 bpp **only** with Picture (CUPS ColorModel
+Gray is often the PPD default and would otherwise crawl every job). Print
+quality must **not** force tone by itself.
 
 ### Paper type — `MediaType` (label only)
 
@@ -70,10 +77,10 @@ should not see “Plain paper” like a laser.
 
 | PPD / PWG name | Kid label | Points | mm | Role |
 |---|---|---|---|---|
-| Roll48 / `custom_cat-tape_48x297mm` | Cat tape 48 mm | 136 × 842 | 48 × 297 | **Default.** Paint / doodles. |
-| Roll48Long / `custom_cat-tape-long_48x500mm` | Cat tape long | 136 × 1417 | 48 × 500 | Long receipt. |
-| DocA4 / `iso_a4_210x297mm` | Document A4 | 595 × 842 | 210 × 297 | Homework miniature. |
-| DocLetter / `na_letter_8.5x11in` | Document Letter | 612 × 792 | 8.5 × 11 in | Same, US. |
+| Roll48 / `custom_cat-tape_48x297mm` | Cat Tape short | 136 × 842 | 48 × 297 | **Default.** Paint / doodles. |
+| Roll48Long / `custom_cat-tape-long_48x500mm` | Cat Tape long | 136 × 1417 | 48 × 500 | Long receipt. |
+| DocA4 / `iso_a4_210x297mm` | Cat Minidoc A4 | 595 × 842 | 210 × 297 | Homework miniature. |
+| DocLetter / `na_letter_8.5x11in` | Cat Minidoc Letter | 612 × 792 | 8.5 × 11 in | Same, US. |
 
 Default page size stays tape so GTK preview is a skinny strip, not A4.
 203 dpi. Apps that still ship A4 PDFs (Firefox) keep working:
@@ -86,7 +93,7 @@ is on tape media.
 
 1. Flatten alpha onto **white** (Pillow RGBA-on-black was a black slab).
 2. Rec. 709 luma (`0.2126 R + 0.7152 G + 0.0722 B`).
-3. Trim (unless Document / sheet).
+3. Trim (tape: all sides; Minidoc/sheet: left/right white only).
 4. LANCZOS to width 384; cap height.
 5. Mild unsharp (Default / Picture / Document).
 6. Then either 1 bpp dither or thermal S-curve + 16-level serpentine FS.
@@ -101,10 +108,10 @@ only shows layout at the advertised page size — it cannot show our dither.
 
 ## Kid sentences
 
-- Drawings / paint: **Cat tape 48 mm**, Default or Picture.
-- Photos / crayon: **Picture** + **Grayscale**.
+- Drawings / paint: **Cat Tape short**, Default, **Black and white**.
+- Photos / crayon: **Picture** + **Grayscale** (slower on purpose).
 - Stick figures / type on tape: **Text** + **Black and white**.
-- LibreOffice homework: paper size **Document A4** (or Letter).
+- LibreOffice homework: paper size **Cat Minidoc A4** (or Letter); pick Text or Default.
 - Sticker vs paper: pick the label if you want; the burn is the same.
 - Never make Cat Printer the system default printer.
 
@@ -130,5 +137,5 @@ contract** on top of those enums using standard IPP:
 
 - print-quality 3/4/5 → Text / Default / Picture (names, not Draft/Normal/High)
 - print-color-mode bi-level / monochrome → BlackWhite / Grayscale
-- A4/Letter media → Document preset + sheet layout
+- A4/Letter media → sheet layout (trim left/right white only); style stays print-quality
 - media-type stationery / labels → Paper / Sticker (ignored for burn)

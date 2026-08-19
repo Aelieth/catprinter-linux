@@ -116,8 +116,8 @@ fn http_body(resp: &str) -> &str {
 }
 
 #[test]
-fn shipped_binary_version_is_0_3_1() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.1");
+fn shipped_binary_version_is_0_3_2() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.2");
     let out = Command::new(env!("CARGO_BIN_EXE_catprinterd"))
         .arg("--version")
         .output()
@@ -130,7 +130,7 @@ fn shipped_binary_version_is_0_3_1() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         text.trim(),
-        "catprinterd 0.3.1",
+        "catprinterd 0.3.2",
         "stdout={text:?} stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -145,7 +145,7 @@ fn health_and_status_page() {
         .unwrap_or_else(|e| panic!("live /health is not JSON ({e}): {json}"));
     assert_eq!(
         v.get("version").and_then(|x| x.as_str()),
-        Some("0.3.1"),
+        Some("0.3.2"),
         "{json}"
     );
     assert_eq!(
@@ -155,11 +155,11 @@ fn health_and_status_page() {
     );
     let page = ureq_get(d.port, "/");
     assert!(page.contains("Cat Printer"));
-    assert!(page.contains("catprinterd 0.3.1"), "{page}");
+    assert!(page.contains("catprinterd 0.3.2"), "{page}");
     let strings = ureq_get(d.port, "/strings/en.strings");
-    assert!(strings.contains("Cat tape 48 mm"));
-    assert!(strings.contains("Document A4"));
-    assert!(strings.contains("Document Letter"));
+    assert!(strings.contains("Cat Tape short"));
+    assert!(strings.contains("Cat Minidoc A4"));
+    assert!(strings.contains("Cat Minidoc Letter"));
     assert!(strings.contains("\"print-quality.3\" = \"Text\";"));
     assert!(strings.contains("\"print-quality.4\" = \"Default\";"));
     assert!(strings.contains("\"print-quality.5\" = \"Picture\";"));
@@ -219,7 +219,7 @@ fn get_printer_attributes(port: u16) -> catprinterd::ipp::codec::Request {
 }
 
 #[test]
-fn live_document_sizes_are_tape_width_and_both_tones_exist() {
+fn live_document_sizes_are_physical_a4_letter_and_both_tones_exist() {
     use catprinterd::ipp::codec::Group;
     use catprinterd::ipp::media;
     let d = spawn_daemon(&[]);
@@ -238,21 +238,18 @@ fn live_document_sizes_are_tape_width_and_both_tones_exist() {
         Some(Group::PrinterAttributes),
         "pwg-raster-document-type-supported",
     );
-    assert!(
-        rasters.iter().any(|c| c == "black_1") && rasters.iter().any(|c| c == "sgray_8"),
-        "{rasters:?}"
-    );
+    assert_eq!(rasters, vec!["sgray_8"], "{rasters:?}");
     let (ax, ay) = back
         .media_database_xy(media::A4.name)
-        .expect("Document A4 in live media-col-database");
+        .expect("Cat Minidoc (A4) in live media-col-database");
     let (lx, ly) = back
         .media_database_xy(media::LETTER.name)
         .expect("Document Letter in live media-col-database");
     assert_eq!((ax, ay), (media::A4.x_hmm, media::A4.y_hmm));
     assert_eq!((lx, ly), (media::LETTER.x_hmm, media::LETTER.y_hmm));
-    assert_eq!(ax, 4800);
-    assert_eq!(lx, 4800);
-    assert_eq!(ax, media::TAPE_X_HMM);
+    assert_eq!((ax, ay), (21000, 29700));
+    assert_eq!((lx, ly), (21590, 27940));
+    assert_ne!(ax, media::TAPE_X_HMM, "Document must not be tape-width");
 }
 
 /// Minimal HTTP GET (no client crate needed).

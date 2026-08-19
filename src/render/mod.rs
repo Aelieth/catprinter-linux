@@ -317,9 +317,17 @@ pub fn prepare(pages: Vec<GrayPage>, opts: &RenderOptions) -> Result<GrayStrip, 
         }
         l => l,
     };
-    let do_trim = opts
-        .trim_override
-        .unwrap_or(layout == Layout::Tape && opts.preset.trim());
+    // Tape: trim all sides (drawings). Sheet/Minidoc: trim left/right white only so Gwenview/KDE's
+    // ~0.17 in dialog margins (and office side margins) do not shrink type; keep full page height
+    // so the title stays at the top and the last line at the bottom.
+    let (trim_rows, trim_cols) = match opts.trim_override {
+        Some(true) => (true, true),
+        Some(false) => (false, false),
+        None => {
+            let tape = layout == Layout::Tape && opts.preset.trim();
+            (tape, tape || layout == Layout::Sheet)
+        }
+    };
 
     // Blank pages carry nothing; drop them unless everything is blank.
     let inked: Vec<&GrayPage> = pages.iter().filter(|p| has_ink(&p.data)).collect();
@@ -336,7 +344,7 @@ pub fn prepare(pages: Vec<GrayPage>, opts: &RenderOptions) -> Result<GrayStrip, 
 
     // Column bounds are unioned across pages so every page shares one horizontal scale.
     let mut crops: Vec<(Range<u32>, Range<u32>)> = Vec::with_capacity(inked.len()); // (rows, cols) per page
-    if do_trim {
+    if trim_rows || trim_cols {
         let mut c0 = u32::MAX;
         let mut c1 = 0u32;
         let mut rows_per_page = Vec::with_capacity(inked.len());
@@ -345,11 +353,15 @@ pub fn prepare(pages: Vec<GrayPage>, opts: &RenderOptions) -> Result<GrayStrip, 
             let (r, c) = ink_bounds(p, pad).expect("inked page has bounds");
             c0 = c0.min(c.start);
             c1 = c1.max(c.end);
-            rows_per_page.push(r);
+            rows_per_page.push(if trim_rows { r } else { 0..p.height });
         }
-        // Union of column ranges must be applied per page but clamped to each page's own width.
         for (p, r) in inked.iter().zip(rows_per_page) {
-            crops.push((r, c0..c1.min(p.width)));
+            let cols = if trim_cols {
+                c0..c1.min(p.width)
+            } else {
+                0..p.width
+            };
+            crops.push((r, cols));
         }
     } else {
         for p in &inked {
@@ -860,10 +872,10 @@ mod tests {
 
     #[test]
     fn document_keeps_full_page_default_trims() {
-        // header + footer, nothing in the middle
+        // header + footer spanning the width, nothing in the middle
         let mut sheet = white(800, 1100, 100);
-        fill(&mut sheet, 100, 20, 700, 40, 0);
-        fill(&mut sheet, 100, 1060, 700, 1080, 0);
+        fill(&mut sheet, 0, 20, 800, 40, 0);
+        fill(&mut sheet, 0, 1060, 800, 1080, 0);
         let full = prepare(
             vec![sheet.clone()],
             &opts(Preset::Document, Tone::BlackWhite),
@@ -881,7 +893,7 @@ mod tests {
         assert!(p.preview.data[..30 * 384].contains(&0));
         assert!(p.preview.data[(528 - 30) * 384..].contains(&0));
 
-        // A small mark in the middle: Tape/Default crops, Sheet/Document does not.
+        // A small mark in the middle: Tape/Default crops vertically; Sheet keeps page height.
         let mut page = white(800, 1100, 100);
         fill(&mut page, 360, 520, 440, 580, 0);
         let trimmed = prepare(
@@ -894,8 +906,76 @@ mod tests {
         .unwrap();
         let whole = prepare(vec![page], &opts(Preset::Document, Tone::BlackWhite)).unwrap();
         assert!(trimmed.height < 400, "{}", trimmed.height);
-        assert_eq!(whole.height, 528);
         assert!(whole.height > trimmed.height);
+        assert!(
+            whole.height > 400,
+            "sheet keeps vertical page, height={}",
+            whole.height
+        );
+    }
+
+    #[test]
+    fn document_scales_physical_a4_keeping_title_and_last_line() {
+        // CUPS A4 @ 203 dpi is ~1678×2374. Whole page → 384 × ~543 (~4.4×).
+        let w = 1678u32;
+        let h = 2374u32;
+        let mut page = white(w, h, 203);
+        fill(&mut page, 0, 20, w, 60, 0); // title (full width so side-trim is a no-op)
+        fill(&mut page, 0, h - 60, w, h - 20, 0); // last line
+        let s = prepare(vec![page], &opts(Preset::Document, Tone::BlackWhite)).unwrap();
+        assert_eq!(s.layout, Layout::Sheet);
+        assert_eq!(s.width, 384);
+        let expect_h = (h as f64 * 384.0 / w as f64).round() as u32;
+        assert_eq!(s.height, expect_h);
+        assert!(
+            expect_h > 500 && expect_h < 600,
+            "A4 miniature height {expect_h}"
+        );
+        let row = |y: u32| &s.data[(y * 384) as usize..((y + 1) * 384) as usize];
+        let title_y = (40.0 * 384.0 / w as f64).round() as u32;
+        let last_y = ((h - 40) as f64 * 384.0 / w as f64).round() as u32;
+        assert!(
+            row(title_y.min(s.height - 1)).iter().any(|&v| v < 128),
+            "title missing near y={title_y}"
+        );
+        assert!(
+            row(last_y.min(s.height - 1)).iter().any(|&v| v < 128),
+            "last line missing near y={last_y}"
+        );
+        let mid = s.height / 2;
+        assert!(
+            row(mid).iter().all(|&v| v > 200),
+            "middle of the sheet must stay empty (no trim-to-content)"
+        );
+    }
+
+    #[test]
+    fn sheet_drops_side_margins_but_keeps_page_height() {
+        // 0.17 in @ 203 dpi ≈ 35 px per side (Gwenview/KDE dialog default).
+        let w = 1678u32;
+        let h = 2374u32;
+        let side = 35u32;
+        let mut page = white(w, h, 203);
+        fill(&mut page, side, 20, w - side, 60, 0);
+        fill(&mut page, side, h - 60, w - side, h - 20, 0);
+        let s = prepare(vec![page], &opts(Preset::Document, Tone::BlackWhite)).unwrap();
+        assert_eq!(s.layout, Layout::Sheet);
+        assert_eq!(s.width, 384);
+        let pad = 8u32;
+        let content_w = w - 2 * side + 2 * pad; // ink_bounds pads
+        let expect_h = (h as f64 * 384.0 / content_w as f64).round() as u32;
+        assert_eq!(s.height, expect_h);
+        assert!(
+            s.height > 543,
+            "side-trim must enlarge type vs full-page scale, h={}",
+            s.height
+        );
+        let row = |y: u32| &s.data[(y * 384) as usize..((y + 1) * 384) as usize];
+        assert!(row(0).iter().all(|&v| v > 200), "top of page stays empty");
+        assert!(
+            row(s.height / 2).iter().all(|&v| v > 200),
+            "middle stays empty"
+        );
     }
 
     #[test]
@@ -910,7 +990,7 @@ mod tests {
             Layout::Tape
         );
         let mut a4 = white(1678, 300, 203);
-        fill(&mut a4, 10, 10, 20, 20, 0);
+        fill(&mut a4, 0, 10, 1678, 20, 0); // full width so side-trim is a no-op
         let s = prepare(vec![a4], &opts(Preset::Default, Tone::BlackWhite)).unwrap();
         assert_eq!(s.layout, Layout::Sheet);
         assert_eq!(s.height, (300.0 * 384.0 / 1678.0f64).round() as u32);
@@ -1099,6 +1179,44 @@ mod tests {
         // preview levels map back to gray: black pixel 0, white 255
         assert_eq!(p.preview.data[0], 0);
         assert_eq!(p.preview.data[1], 255);
+    }
+
+    #[test]
+    fn styles_differ_on_midgray() {
+        // 8-bit mid-gray: Text (threshold) vs Default (FS) must not look the same.
+        // Picture vs Default share FS bits; heat is A2 intensity (0x78 vs 0x5D).
+        let mut page = white(384, 48, 203);
+        fill(&mut page, 0, 0, 384, 48, 128);
+        let pack_style = |preset: Preset, tone: Tone, mode: PrintMode| {
+            let o = RenderOptions {
+                rotate_180: false,
+                trim_override: Some(false),
+                ..opts(preset, tone)
+            };
+            let s = prepare(vec![page.clone()], &o).unwrap();
+            pack(&s, &o, mode, 384).unwrap()
+        };
+        let text = pack_style(Preset::Text, Tone::BlackWhite, PrintMode::Mono);
+        let default = pack_style(Preset::Default, Tone::BlackWhite, PrintMode::Mono);
+        let picture = pack_style(Preset::Picture, Tone::BlackWhite, PrintMode::Mono);
+        assert_ne!(
+            text.data, default.data,
+            "Text threshold vs Default dither must differ"
+        );
+        assert_eq!(
+            picture.data, default.data,
+            "Picture and Default share FS bits; heat is intensity"
+        );
+        assert_eq!(Preset::Picture.intensity(), 0x78);
+        assert_eq!(Preset::Default.intensity(), 0x5D);
+        assert_ne!(Preset::Picture.intensity(), Preset::Text.intensity());
+        let photo = pack_style(Preset::Picture, Tone::Grayscale, PrintMode::Gray4);
+        let text_g = pack_style(Preset::Text, Tone::Grayscale, PrintMode::Gray4);
+        assert_eq!(photo.mode, PrintMode::Gray4);
+        assert_ne!(
+            photo.data, text_g.data,
+            "Picture grayscale FS vs Text quantize must differ"
+        );
     }
 
     #[test]

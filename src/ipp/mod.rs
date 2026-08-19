@@ -841,11 +841,7 @@ impl IppService {
             Desc,
             v_mimes(&DOCUMENT_FORMATS),
         );
-        put(
-            "pwg-raster-document-type-supported",
-            Desc,
-            v_kws(&["black_1", "sgray_8"]),
-        );
+        put("pwg-raster-document-type-supported", Desc, v_kw("sgray_8"));
         put(
             "pwg-raster-document-resolution-supported",
             Desc,
@@ -874,7 +870,6 @@ impl IppService {
                 "orientation-requested",
                 "output-bin",
                 "print-color-mode",
-                "print-content-optimize",
                 "print-quality",
                 "print-scaling",
                 "printer-resolution",
@@ -988,12 +983,6 @@ impl IppService {
             "print-color-mode-supported",
             Tmpl,
             v_kws(&["bi-level", "monochrome"]),
-        );
-        put("print-content-optimize-default", Tmpl, v_kw("auto"));
-        put(
-            "print-content-optimize-supported",
-            Tmpl,
-            v_kws(&["auto", "photo", "text", "graphic", "text-and-graphic"]),
         );
         put("print-quality-default", Tmpl, v_enum(4));
         put("print-quality-supported", Tmpl, v_enums(&[3, 4, 5]));
@@ -1250,10 +1239,7 @@ mod tests {
             Some(Group::PrinterAttributes),
             "pwg-raster-document-type-supported",
         );
-        assert!(
-            rasters.iter().any(|c| c == "black_1") && rasters.iter().any(|c| c == "sgray_8"),
-            "{rasters:?}"
-        );
+        assert_eq!(rasters, vec!["sgray_8"], "{rasters:?}");
         assert_eq!(
             back.get_ints(Some(Group::PrinterAttributes), "print-quality-supported"),
             vec![3, 4, 5]
@@ -1266,12 +1252,14 @@ mod tests {
             back.media_database_xy(media::LETTER.name),
             Some((media::LETTER.x_hmm, media::LETTER.y_hmm))
         );
-        assert_eq!(media::A4.x_hmm, 4800);
-        assert_eq!(media::LETTER.x_hmm, 4800);
+        assert_eq!(media::A4.x_hmm, 21000);
+        assert_eq!(media::LETTER.x_hmm, 21590);
+        assert_eq!(media::A4.y_hmm, 29700);
+        assert_eq!(media::LETTER.y_hmm, 27940);
     }
 
     #[tokio::test]
-    async fn document_a4_fake_job_is_384_wide_document_preset() {
+    async fn minidoc_a4_fake_job_keeps_default_style_and_sheet() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path());
         let pwg = include_bytes!("../../tests/fixtures/tiny-roll48.pwg");
@@ -1325,10 +1313,11 @@ mod tests {
         let json_path = json_path.expect("fake printer wrote no job-*.json").path();
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-        assert_eq!(json["preset"], "document", "{json}");
+        assert_eq!(json["preset"], "default", "{json}");
         assert_eq!(json["layout"], "Sheet", "{json}");
         assert_eq!(json["width"], 384, "{json}");
         assert_eq!(json["tone"], "blackwhite", "{json}");
+        assert_eq!(json["mode"], "1bpp", "{json}");
     }
 
     #[tokio::test]

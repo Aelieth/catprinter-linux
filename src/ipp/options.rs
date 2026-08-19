@@ -130,15 +130,14 @@ impl JobOptions {
                 _ => {}
             }
         }
-        let tone = match self.color_mode.as_str() {
-            "monochrome" => Tone::Grayscale,
-            _ => Tone::BlackWhite, // bi-level, process-bi-level, auto, …
+        // CUPS ColorModel Gray sends monochrome even when the kid left the default.
+        // 4 bpp is the slow photo path only: Picture + Grayscale.
+        let tone = match (self.color_mode.as_str(), preset) {
+            ("monochrome", Preset::Picture) => Tone::Grayscale,
+            _ => Tone::BlackWhite, // bi-level, auto, or Gray+Default/Text
         };
+        // Minidoc is paper size: whole-page Sheet, no trim. Style stays Text/Default/Picture.
         let sheet = !is_image && self.is_sheet_media();
-        // Homework on A4/Letter: Document preset (no trim, threshold, 0x68).
-        if sheet {
-            preset = Preset::Document;
-        }
         o.preset = preset;
         o.tone = tone;
         o.layout = if is_image {
@@ -232,7 +231,19 @@ mod tests {
         assert_eq!(
             o.render_options(&base, false).tone,
             Tone::Grayscale,
-            "monochrome is the grayscale tone"
+            "Picture + monochrome is the 4 bpp photo path"
+        );
+        let o = JobOptions::from_request(
+            &req_with(vec![
+                ("print-quality", v_enum(4)),
+                ("print-color-mode", v_kw("monochrome")),
+            ]),
+            10,
+        );
+        assert_eq!(
+            o.render_options(&base, false).tone,
+            Tone::BlackWhite,
+            "Gray+Default must stay 1 bpp so the CUPS Gray default is not a crawl"
         );
         let o = JobOptions::from_request(
             &req_with(vec![("print-content-optimize", v_kw("photo"))]),
@@ -263,33 +274,43 @@ mod tests {
     }
 
     #[test]
-    fn sheet_media_selects_document_preset() {
+    fn sheet_media_keeps_style_and_disables_trim() {
         let base = RenderOptions::default();
-        let mc = Coll::new()
-            .add(
-                "media-size",
-                Coll::new()
-                    .add("x-dimension", v_int(media::A4.x_hmm))
-                    .add("y-dimension", v_int(media::A4.y_hmm))
-                    .build(),
-            )
-            .add("media-size-name", v_kw("iso_a4_210x297mm"))
-            .build();
-        let o = JobOptions::from_request(
-            &req_with(vec![("print-quality", v_enum(5)), ("media-col", mc)]),
+        let mc = || {
+            Coll::new()
+                .add(
+                    "media-size",
+                    Coll::new()
+                        .add("x-dimension", v_int(media::A4.x_hmm))
+                        .add("y-dimension", v_int(media::A4.y_hmm))
+                        .build(),
+                )
+                .add("media-size-name", v_kw("iso_a4_210x297mm"))
+                .build()
+        };
+        let picture = JobOptions::from_request(
+            &req_with(vec![("print-quality", v_enum(5)), ("media-col", mc())]),
             10,
         );
-        let ro = o.render_options(&base, false);
-        assert_eq!(ro.preset, Preset::Document);
+        let ro = picture.render_options(&base, false);
+        assert_eq!(ro.preset, Preset::Picture, "Minidoc must not wipe Picture");
         assert_eq!(ro.layout, Layout::Sheet);
-        assert!(!ro.preset.trim());
-        assert_eq!(o.media.as_ref().unwrap().x_hmm, 4800);
-        assert!(
-            o.is_sheet_media(),
-            "Document A4 at tape width must stay the no-trim path"
+        assert_eq!(ro.tone, Tone::BlackWhite);
+        assert_eq!(picture.media.as_ref().unwrap().x_hmm, 21000);
+        assert!(picture.is_sheet_media());
+        let text = JobOptions::from_request(
+            &req_with(vec![("print-quality", v_enum(3)), ("media-col", mc())]),
+            10,
         );
+        let ro = text.render_options(&base, false);
+        assert_eq!(ro.preset, Preset::Text);
+        assert_eq!(ro.layout, Layout::Sheet);
+        let default = JobOptions::from_request(&req_with(vec![("media-col", mc())]), 10);
+        let ro = default.render_options(&base, false);
+        assert_eq!(ro.preset, Preset::Default);
+        assert_eq!(ro.layout, Layout::Sheet);
         // JPEG passthrough stays tape even if the job claimed A4.
-        let ro = o.render_options(&base, true);
+        let ro = picture.render_options(&base, true);
         assert_eq!(ro.layout, Layout::Tape);
         assert_eq!(ro.preset, Preset::Picture);
     }
@@ -306,7 +327,11 @@ mod tests {
             10,
         );
         let ro = o.render_options(&base, false);
-        assert_eq!((ro.preset, ro.tone), (Preset::Text, Tone::Grayscale));
+        assert_eq!(
+            (ro.preset, ro.tone),
+            (Preset::Text, Tone::BlackWhite),
+            "Text stays 1 bpp; 4 bpp is Picture + Grayscale only"
+        );
         assert!(ro.preset.trim());
     }
 

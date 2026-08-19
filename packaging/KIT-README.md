@@ -35,7 +35,7 @@ kit tarball for this architecture from GitHub Releases and verify it against `SH
 
 What it does: installs `/usr/local/bin/catprinterd`, `catprinter.service` (the daemon,
 `DynamicUser`, hardened) and `catprinter-queue.service` (a root oneshot that runs
-`lpadmin -m everywhere` at every boot so the CUPS queue **CatPrinter** always exists and points at
+`lpadmin` with a cups-filters driverless PPD at every boot so the CUPS queue **CatPrinter** always exists and points at
 the daemon), keeps a copy of the units + `VERSION`/`INSTALLED` under `/usr/local/share/catprinter`,
 creates `/etc/catprinter/env`, waits for the daemon, and prints a status table. It never makes the
 cat printer the system default. Re-running is safe. `status` exits 0 only when both units are
@@ -75,12 +75,13 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 ## In the print dialog
 
 * Printer: **CatPrinter** (never the default — a 48 mm tape must not receive homework by accident).
-* **Media**: **Cat tape 48 mm** (default) · Cat tape long · **Document A4** / Document Letter
-  (48 mm × A4/Letter aspect — whole homework page shrunk to 384 dots, not a left strip) ·
-  Custom (48 mm × up to 5000 mm).
-* **Print quality**: **Default** (drawings) · Text (sharp) · Picture (photos / crayon). Style only.
-* **Color / tone**: **Black and white** (default) · Grayscale (16-level on the MXW01). Picture +
-  Grayscale is the photo path.
+* **Media**: **Cat Tape short** (default) · Cat Tape long · **Cat Minidoc A4** /
+  Cat Minidoc Letter (true A4 / Letter so the app emits a full page; we shrink that
+  whole raster to 384 dots, leftover left/right white only) · Custom (48 mm × up to 5000 mm).
+* **Print quality**: **Default** (drawings) · Text (sharp glyphs) · Picture (hotter dither).
+  Style applies on tape and on Minidoc.
+* **Color / tone**: **Black and white** (default, fast 1-bit) · Grayscale. 16-level (slower)
+  only for **Picture + Grayscale**.
 * **Paper type**: Paper · Sticker (label only; same burn).
 * Anything CUPS can print prints: PDF, text, PNG/JPEG, LibreOffice, browsers, n-up, copies.
   `.webp` is not a CUPS type — convert first.
