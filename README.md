@@ -1,4 +1,4 @@
-# catprinterd — because your $1 AliExpress cat printer deserves better than a mean phone app and BlueZ tantrums
+# catprinterd — your tiny Bluetooth cat printer finally feels at home on Linux 🐱🖨️
 
 <img src="media/catprinter-with-nyancat.jpg" alt="Catprinter with Nyan Cat" width="400">
 
@@ -8,56 +8,62 @@ You bought the cutest, cheapest little thermal printer on the internet. It has a
 
 Bluetooth Low Energy + BlueZ + combo wireless cards that secretly dislike cats + an official phone app that hogs the single connection = a special kind of chaos. An entire program had to be written so this catty device would behave like a normal printer.
 
-**catprinterd** is that program: a small, hardened Rust daemon that turns an MXW01 (and the GB0x / GT01 / MX0x / YT01 / X5 / X6 family) into a driverless **IPP Everywhere** printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer. No PPD to install, no per-user setup, works for every account on the machine, and survives reboots without anyone logging in.
+**catprinterd** is the better way: a small, hardened Rust daemon that turns your cat printer into a real system **IPP Everywhere** printer. Unlike the phone app, it doesn’t hog the only Bluetooth connection, works for every user on the machine, survives reboots, and appears in the normal File → Print dialog. No pairing. No phone required after the one-time setup.
+
+Supported models (auto-detected): **MXW01** (with lovely 16-level grayscale) and the classic family **GB0x / GT01 / MX0x / YT01 / X5 / X6**.
+
 
 ```
-File → Print ──► cupsd (cups-filters: your PDF/photo → PWG raster) ──► catprinterd ──► Bluetooth LE ──► 🐈 *purrs and prints*
+File → Print  →  CUPS  →  catprinterd  →  Bluetooth  →  🐈 *purrs and prints*
 ```
 
 ### The Sacred Kid Contract 🤝
 
 1. Bluetooth is on  
 2. The cat printer is on  
-3. Hit Print  
+3. Hit **Print**
 
-No pairing. No MAC addresses. No phone apps. That is the entire contract.
+No MAC addresses. No pairing. No phone apps.
 
-- **Hold-and-wait magic:** If the printer is off, the job waits (2 minutes by default) and the queue says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints. If the cat is already awake, the print should start in a few seconds — they nap after ~5–6 minutes of boredom, so a longer wait only blocks the queue.  
-- **At home on any Linux:** One self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two systemd units, one env file. The cat purrs on Fedora, Debian/Ubuntu, Arch, openSUSE — any systemd + CUPS distro — and is especially cozy on Immutable Fedora (nothing layered into rpm-ostree). Runtime treats: `cups`, `cups-filters`, `bluez`, `util-linux`/`rfkill`, `curl` (`avahi` optional; `policycoreutils` only where SELinux prowls). Per-distro shopping list in *Feed the cat first* below. 🍽️  
-- **Model autodetect:** MXW01 (16-level grayscale) or the classic family; a new printer simply works.
+**Hold-and-wait magic:** If the printer is off or napping, the job waits patiently in our queue (2 minutes by default) and the status says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints.  
 
-## Install (admin, once per machine) — Make the cat official
+The little cats fall asleep after about 5–6 minutes of boredom. If yours is already awake, the print usually starts in just a few seconds. A longer wait only blocks the queue while the cat is still sleeping. (The phone app can’t do this.)
 
-**Feed the cat first** 🍽️ — the daemon needs a few treats from your package manager. It never installs them itself (a well-mannered cat doesn't raid the pantry); if one is missing, `install.sh` just prints the exact command for *your* distro.
+### Quick Install — Make the cat official
 
-| Distro | one-time treats |
-|---|---|
+First, give the cat its treats:
+
+| Distro              | Packages |
+|---------------------|----------|
 | Fedora / RHEL / openSUSE | `sudo dnf install cups cups-filters bluez avahi util-linux policycoreutils curl` |
-| Debian / Ubuntu | `sudo apt install cups cups-filters cups-ipp-utils bluez avahi-daemon avahi-utils rfkill curl` |
-| Arch | `sudo pacman -S cups cups-filters bluez bluez-utils avahi util-linux curl` |
+| Debian / Ubuntu     | `sudo apt install cups cups-filters cups-ipp-utils bluez avahi-daemon avahi-utils rfkill curl` |
+| Arch                | `sudo pacman -S cups cups-filters bluez bluez-utils avahi util-linux curl` |
 
-`avahi` is optional (it helps the cat introduce itself to the desktop); `policycoreutils` only matters where SELinux is on the prowl (Fedora/RHEL/openSUSE). Prebuilt kits are **x86_64** and **aarch64** (Raspberry Pi den 🐾 included). Anything else: `cargo build --release`, then `sudo ./install.sh --binary target/release/catprinterd`.
+Prebuilt kits are available for **x86_64** and **aarch64** (Raspberry Pi friendly). Or build with `cargo build --release`.
 
-Grab the kit (`make kit` → `dist/catprinter-kit/`, or the release tarball) and run:
+Then:
 
 ```sh
-sudo ./install.sh              # install or upgrade
-sudo ./install.sh status       # units, health, CUPS queue, journal — how is the cat feeling?
-sudo ./install.sh update       # swap binary, restart, regenerate the CUPS PPD
-sudo ./install.sh uninstall    # remove queue + units (+ --purge for /etc/catprinter)
+sudo ./install.sh          # install or upgrade
+sudo ./install.sh status   # how is the cat feeling?
 ```
 
-What it does: copies `catprinterd` to `/usr/local/bin`, installs `catprinter.service` (the daemon, `DynamicUser`, hardened, `Type=notify`) and `catprinter-queue.service` (a root oneshot that runs `lpadmin` with a driverless PPD at every boot so the queue self-heals), creates `/etc/catprinter/env`, installs a udev rule so combo Wi-Fi/Bluetooth cards don’t nap mid-Connect (`61-catprinter-btusb.rules`), turns on BlueZ `Experimental = true` so we can force an **LE** connect (MXW01 ads look dual-mode; Classic `Connect` never talks to the printer), and prints a status table. Old per-user `mxw01d` units are removed.
+The printer appears as **CatPrinter** in every print dialog.
 
-**Image-baked (custom uBlue / ostree image):** `make image-files DEST=<rootfs>` drops the same files into `/usr/bin`, `/usr/lib/systemd/system`, the `etc/systemd/system/multi-user.target.wants/` symlinks (so they are enabled at build time), a system-preset, `/usr/lib/udev/rules.d/61-catprinter-btusb.rules`, and `/usr/lib/catprinter/{VERSION,install.sh,env.example}`. Containerfile: `COPY image-root/ /`. Zero per-machine steps on first boot and on every rebase. On such a machine `install.sh` only manages `/etc/catprinter/env` and unit state; the image always wins. See [packaging/KIT-README.md](packaging/KIT-README.md).
+> ⚠️ **Please do not make CatPrinter the system default.**  
+> Homework (or any long document) on 48 mm thermal tape is its own special kind of chaos. Use a normal printer for schoolwork.  
+>  
+> The **Cat Minidoc** (Document) option is perfect for mini flyers, cute notes, and stylized little pages — it shrinks a full page into a readable strip the cat can handle.
 
-Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPRINTER_DEVICE` (pin one printer), `CATPRINTER_MODEL` (`auto|mxw01|classic`), `CATPRINTER_PRINTER_WAIT`, `CATPRINTER_PORT`, `CATPRINTER_DNSSD`, `CATPRINTERD_ARGS` (e.g. `--fake-printer DIR` for testing).
+### What the cat loves to print 🎨
 
-## In the print dialog — What will the cat eat today?
+| What you want            | Paper                | Style     | Tone          |
+|--------------------------|----------------------|-----------|---------------|
+| Doodles / stickers / notes | Cat Tape short      | Default   | Black & white |
+| Photos / crayon art      | Cat Tape short       | Picture   | Grayscale     |
+| Mini flyers / stylized pages | Cat Minidoc A4 or Letter | Text or Default | Black & white |
 
-File → Print, printer **CatPrinter**. Same CUPS/IPP dialog on Fedora, Debian/Ubuntu, Arch, and openSUSE after `install.sh`. Never make it the *system* default (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
-
-There is **no** extra “Print Optimization” menu (Text / Photo / Graphics). Style lives in one place.
+## Customized Cat-tastic options
 
 | Setting | Choices | What happens |
 |---|---|---|
@@ -67,50 +73,30 @@ There is **no** extra “Print Optimization” menu (Text / Photo / Graphics). S
 | **Paper type** | **Paper** · Sticker | A label for kids. Same heat. |
 | Copies, n-up, landscape | as usual | CUPS already knows how. |
 
-| Tell it to print… | Paper | Style | Tone |
-|---|---|---|---|
-| Paint / doodles | Cat Tape short | Default | Black and white |
-| Photos / crayon | Cat Tape short | **Picture** | **Grayscale** |
-| Homework | **Cat Minidoc A4** (or Letter) | Text or Default | Black and white |
+**A little about your cat printer**  
+It prints on 48 mm thermal paper or stickers with a 384-dot head. The MXW01 can do beautiful 16-level grayscale (especially with Picture + Grayscale). You get three thoughtful styles (Default for drawings, Text for sharp letters, Picture for hotter, richer dithering) that the phone app doesn’t match as nicely. Paper type (Paper or Sticker) is just a friendly label for kids — the heat is the same. Cat Minidoc shrinks a whole A4 or Letter page (~4.4×) into a neat, readable strip with the title at the top and white margins on the sides — ideal for flyers and creative notes.
 
-The old Python-era contract is in [original-settings.md](original-settings.md).
+### If the cat is grumpy 😿
 
-## Troubleshooting — When the cat is grumpy 😿
-
-| Queue message (`lpstat -p CatPrinter -l`, GNOME/KDE printer applet) | What to do (cat-whisperer edition) |
-|---|---|
-| Cat printer not found — turn it on and keep it near the computer | Power the printer on (and close the phone app; it allows only one connection). The job continues by itself. |
-| Could not connect to the cat printer… | Close the phone app; if Bluetooth Settings is holding it, turn the printer off and on. Keep it next to the computer. The job keeps trying. |
-| Bluetooth is turned off on this computer | Turn Bluetooth on (`rfkill unblock bluetooth`). The cat cannot hear you otherwise. |
-| The cat printer is out of paper. | Load a roll, close the lid. Hungry cats need paper. |
-| The cat printer is too hot / battery is low | Wait a minute / charge it. Even cats need rest. |
-| Cat printer not found for 2 min — job N stopped | The job gave up; turn the printer on and print again. |
-| Print would be … long; limit … | Pick a shorter page size or split the document. The tape has limits. |
-| The print stopped partway (Bluetooth dropped)… | Move the printer next to the computer and print again (a retry would reprint the bit that already came out). |
-| queue missing / daemon down | `sudo ./install.sh status`, `journalctl -u catprinter -u catprinter-queue`, `sudo ./install.sh update` |
-| two “Cat Printer” entries in the dialog | the daemon adopts the CUPS queue’s uuid within a minute; if it persists, `sudo systemctl restart catprinter`. |
-
-`catprinterd check` (Bluetooth adapter / bluetoothd / port, plus read-only host facts: TemporaryTimeout, combo, `bt chip`, USB BT `power/control`, `udev`, `Experimental`) and `catprinterd status` (connects to the printer, reports model, battery, paper) are handy on the console. `catprinterd adopt` remembers the printer so the next print does not have to rediscover it (`adopt --status` asks; first successful print does this by itself). `catprinterd doctor` / `doctor --json` answers the questions an installer used to grep BlueZ for: trusted LE? would a connect go LE or Classic? is `ConnectDevice` there? is the queue pointed at us? `bt chip` names the USB Bluetooth family (realtek / mediatek / qca / intel / broadcom) even when the laptop badge is Foxconn or Azurewave. `udev present` means the combo-card autosuspend rule is installed. `Experimental true` means BlueZ will expose `ConnectDevice` so we can connect **LE**, not Classic.
-
-## Developing — For the grown-up cats who like to tinker
+Start with:
 
 ```sh
-make check                      # fmt, clippy -D warnings, tests, shell lint, unit verify
-make fleet-test                 # boots kit + image files in systemd containers (podman; ~3 min warm)
-cargo run -- serve --port 8096 --fake-printer /tmp/fake --dnssd off     # no hardware needed
-ipptool -V 2.0 -tI -f tests/fixtures/text-roll48.pwg -d filetype=image/pwg-raster \
-        ipp://127.0.0.1:8096/ipp/print /usr/share/cups/ipptool/ipp-everywhere.test
-driverless ipp://127.0.0.1:8096/ipp/print      # the PPD CUPS would generate
-lpadmin -p CatTest -E -v ipp://127.0.0.1:8096/ipp/print -P <(driverless ipp://127.0.0.1:8096/ipp/print) && lp -d CatTest file.pdf
-cargo run -- print media/hackoclock.jpg -q picture --tone grayscale    # straight to the printer over BLE
-cargo run -- print file.png --preview-only out.png # render only
+sudo ./install.sh status
 ```
 
-* `--fake-printer DIR` writes `job-N-*.png` (what the head would burn) + `job-N.json` per job and is scripted by `DIR/state` (`ok|off|no-paper|overheated|low-battery|slow|flaky:N`).  
-* Raster fixtures come from CUPS itself: `scripts/make-fixtures.sh` (uses `cupsfilter`).  
-* Layout: `src/protocol` (wire formats), `src/models` (registry + drivers), `src/ble` (BlueZ over D-Bus), `src/raster` (PWG decode), `src/render` (trim/fit/dither/pack), `src/ipp` + `src/http` (IPP Everywhere), `src/engine` (queue/worker), `src/dnssd` (Avahi), `src/cupsq` (uuid adoption).
+Common messages you might see:
+
+| Message | What to do |
+|---------|------------|
+| Cat printer not found — turn it on and keep it near the computer | Power the printer on (and close the phone app — it only allows one connection). The job will continue by itself. |
+| Could not connect to the cat printer… | Close the phone app or turn the printer off and on. Keep it next to the computer. |
+| Bluetooth is turned off on this computer | Turn Bluetooth on. The cat can’t hear you otherwise. |
+| The cat printer is out of paper | Load a new roll and close the lid. Hungry cats need paper! |
+| The cat printer is too hot / battery is low | Give it a minute to cool down, or plug it in to charge. |
+
+For anything else, the status command and the rest of the repository have more help.
 
 ---
 
-Made so kids can simply print.  
-Cat printer is ready. Linux is ready.  
+Made so kids (and tired adults) can simply print — better than the phone app ever did.  
+Cat printer is ready. Linux is ready. 🐾

@@ -24,8 +24,8 @@ portable; the Fedora coupling lived in packaging, docs and tests.
 - **Fleet test on Fedora + Debian + Arch** — real systemd-in-podman boot + a print through CUPS,
   via per-distro provisioners (`tests/fleet/provision/*.sh`) and `FLEET_DISTRO`; `make
   fleet-test-all` runs the set. CI matrix gates on Fedora + Debian, Arch informational.
-- Docs: per-distro prerequisites in README (in the cat's own voice 🐈) and KIT-README; honest
-  arch/glibc floor.
+- Docs: kid-facing README (quick install, what to print, Cat-tastic options) plus KIT-README
+  per-distro treats; honest arch/glibc floor.
 - Print dialog: a pinned classic printer (`CATPRINTER_MODEL=classic`) advertises **Cat Printer
   Classic** instead of misreporting **MXW01**; `mxw01`/`auto` unchanged.
 - Tidy: `[lints.clippy] all = deny` so a plain local `cargo clippy` matches CI's `-D warnings`
