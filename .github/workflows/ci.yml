@@ -171,8 +171,19 @@ jobs:
           file dist/catprinter-kit/catprinterd | tee /dev/stderr | grep -qi aarch64
           ls -la dist/ dist/catprinter-kit/
 
+      # Glob must expand inside dist/ (tar -C does not glob). The unversioned
+      # catprinter-kit-aarch64.tar.gz does not match *-aarch64 (needs a version in the middle).
       - name: Bundle aarch64 kits
-        run: tar -C dist -czf dist-aarch64.tar.gz catprinter-kit-aarch64.tar.gz catprinter-kit-*-aarch64.tar.gz SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          versioned=(catprinter-kit-*-aarch64.tar.gz)
+          test -f catprinter-kit-aarch64.tar.gz
+          test -f SHA256SUMS
+          test "${#versioned[@]}" -ge 1 || { echo "::error::no versioned aarch64 kit tarball in dist/"; ls -la; exit 1; }
+          tar -czf ../dist-aarch64.tar.gz catprinter-kit-aarch64.tar.gz "${versioned[@]}" SHA256SUMS
+          tar -tzf ../dist-aarch64.tar.gz
 
       - name: Upload dist-aarch64
         uses: actions/upload-artifact@v4
