@@ -44,7 +44,6 @@ trait AvahiServer {
     default_service = "org.freedesktop.Avahi"
 )]
 trait AvahiEntryGroup {
-    #[allow(clippy::too_many_arguments)]
     fn add_service(
         &self,
         interface: i32,

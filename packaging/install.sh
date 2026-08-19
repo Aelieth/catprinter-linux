@@ -12,9 +12,12 @@
 #          --yes            no confirmation prompts
 #          --json           with status: machine-readable JSON (do not parse the prose table)
 #
+# Works on any systemd + CUPS distro (Fedora/RHEL/openSUSE, Debian/Ubuntu, Arch), not just ostree
+# images. Runtime deps: cups, cups-filters, bluez, util-linux/rfkill, curl (policycoreutils only where
+# SELinux is on; avahi optional). We never install packages — a missing dep prints the exact install
+# command for the running distro (dnf/apt/pacman/zypper).
 # Immutable-first: nothing is layered into rpm-ostree and nothing outside /usr/local (= /var/usrlocal,
-# writable and persistent) and /etc is touched. Runtime deps are base-image packages only:
-# cups, cups-filters, bluez, util-linux (rfkill), policycoreutils (restorecon), curl, avahi (optional).
+# writable and persistent) and /etc is touched.
 # Image-baked machines (/usr/bin/catprinterd + /usr/lib/systemd/system/catprinter.service, from
 # `make image-files`) are detected: then this script only manages /etc/catprinter/env and the unit
 # state (enable/restart), removes leftover kit files (which would shadow the image's units), and
@@ -32,7 +35,6 @@ ETC=/etc/catprinter
 ENV_FILE=$ETC/env
 KIT_DIR=$HERE                 # units/env.example/VERSION next to this script unless --download re-points it
 IMG_DIR=/usr/lib/catprinter   # image-baked: env.example, VERSION, install.sh (make image-files)
-CUPS_FILTERS=$(cups-config --serverbin 2>/dev/null || echo /usr/lib/cups)/filter
 UNITS=(catprinter.service catprinter-queue.service)
 
 CMD=install
@@ -47,6 +49,9 @@ KIT_EXP_STAMP=""
 TMPD=""
 KIT_EXP_STAMP_DEFAULT=/etc/catprinter/kit-set-experimental
 BLUEZ_CONF_DEFAULT=/etc/bluetooth/main.conf
+DISTRO_ID=""
+DISTRO_LIKE=""
+PKG_FAMILY=""
 
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*" >&2; }
@@ -56,6 +61,98 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 cleanup() { if [[ -n ${TMPD:-} ]]; then rm -rf "$TMPD"; fi; }
 trap cleanup EXIT
+
+# ---- distro detection + package hints ----------------------------------------------------------
+# We never install packages (immutable-first: on ostree a runtime `dnf install` does not apply). We
+# only NAME the right package + command for the running distro, so a missing-dep error is actionable
+# everywhere instead of Fedora-only. Parse /etc/os-release (never source it).
+os_release() {
+  [[ -r /etc/os-release ]] || return 0
+  sed -n "s/^$1=//p" /etc/os-release | tail -1 | tr -d '"'
+}
+detect_distro() {
+  DISTRO_ID=$(os_release ID)
+  DISTRO_LIKE=$(os_release ID_LIKE)
+  case " $DISTRO_ID $DISTRO_LIKE " in
+    *" fedora "*|*" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*) PKG_FAMILY=dnf ;;
+    *" debian "*|*" ubuntu "*|*" linuxmint "*|*" pop "*)              PKG_FAMILY=apt ;;
+    *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*)       PKG_FAMILY=pacman ;;
+    *" suse "*|*" opensuse "*|*" sles "*|*" sled "*)                  PKG_FAMILY=zypper ;;
+    *) PKG_FAMILY="" ;;
+  esac
+}
+# command -> abstract dependency name.
+dep_of() {
+  case "$1" in
+    lpadmin|lpstat|cupsenable|cupsaccept|cupsd|lpinfo) echo cups ;;
+    driverless) echo cups-filters ;;
+    rfkill)     echo rfkill ;;
+    restorecon) echo policycoreutils ;;
+    systemctl)  echo systemd ;;
+    install)    echo coreutils ;;
+    curl)       echo curl ;;
+    *)          echo "$1" ;;
+  esac
+}
+# abstract dependency -> "package(s) (sudo <pm> install <package(s)>)" for the running distro.
+# Name nuances: rfkill is its own package on apt but util-linux elsewhere; avahi CLI is avahi-tools
+# (dnf) / avahi-utils (apt,zypper) / avahi (pacman); Debian needs cups-ipp-utils for `driverless`;
+# Arch needs bluez-utils; Arch ships no default SELinux.
+pkg_hint() {
+  local dep=$1 pkg="" cmd=""
+  case "$PKG_FAMILY:$dep" in
+    dnf:cups) pkg=cups ;;                dnf:cups-filters) pkg=cups-filters ;;
+    dnf:bluez) pkg=bluez ;;              dnf:avahi) pkg="avahi avahi-tools" ;;
+    dnf:rfkill) pkg=util-linux ;;        dnf:policycoreutils) pkg=policycoreutils ;;
+    dnf:curl) pkg=curl ;;                dnf:systemd) pkg=systemd ;;   dnf:coreutils) pkg=coreutils ;;
+    apt:cups) pkg="cups cups-client" ;;  apt:cups-filters) pkg="cups-filters cups-ipp-utils" ;;
+    apt:bluez) pkg=bluez ;;              apt:avahi) pkg="avahi-daemon avahi-utils" ;;
+    apt:rfkill) pkg=rfkill ;;            apt:policycoreutils) pkg=policycoreutils ;;
+    apt:curl) pkg=curl ;;                apt:systemd) pkg=systemd ;;   apt:coreutils) pkg=coreutils ;;
+    pacman:cups) pkg=cups ;;             pacman:cups-filters) pkg=cups-filters ;;
+    pacman:bluez) pkg="bluez bluez-utils" ;; pacman:avahi) pkg=avahi ;;
+    pacman:rfkill) pkg=util-linux ;;     pacman:policycoreutils) pkg="(Arch ships no default SELinux)" ;;
+    pacman:curl) pkg=curl ;;             pacman:systemd) pkg=systemd ;; pacman:coreutils) pkg=coreutils ;;
+    zypper:cups) pkg=cups ;;             zypper:cups-filters) pkg=cups-filters ;;
+    zypper:bluez) pkg=bluez ;;           zypper:avahi) pkg="avahi avahi-utils" ;;
+    zypper:rfkill) pkg=util-linux ;;     zypper:policycoreutils) pkg=policycoreutils ;;
+    zypper:curl) pkg=curl ;;             zypper:systemd) pkg=systemd ;; zypper:coreutils) pkg=coreutils ;;
+    *) printf "'%s' (unknown distro — install your CUPS / cups-filters / BlueZ packages)" "$dep"; return 0 ;;
+  esac
+  case "$PKG_FAMILY" in
+    dnf)    cmd="sudo dnf install $pkg" ;;
+    apt)    cmd="sudo apt install $pkg" ;;
+    pacman) cmd="sudo pacman -S $pkg" ;;
+    zypper) cmd="sudo zypper install $pkg" ;;
+  esac
+  printf '%s (%s)' "$pkg" "$cmd"
+}
+# CUPS serverbin (filter/backend dir). cups-config lives in cups-devel/libcups2-dev (usually absent at
+# runtime); the old /usr/lib/cups fallback is wrong on lib64 distros (Fedora/RHEL/openSUSE).
+cups_serverbin() {
+  local b
+  if have cups-config; then
+    b=$(cups-config --serverbin 2>/dev/null || true)
+    if [[ -n $b && -d $b ]]; then printf '%s\n' "$b"; return 0; fi
+  fi
+  for b in /usr/lib64/cups /usr/lib/cups /usr/libexec/cups; do
+    if [[ -d $b/filter || -d $b/backend ]]; then printf '%s\n' "$b"; return 0; fi
+  done
+  return 1
+}
+# Something can render to what the queue needs: cups-filters `driverless`, CUPS built-in `everywhere`,
+# or a known raster filter. Absence is a WARNING only — ensure_queue falls back driverless -> `-m
+# everywhere`, and catprinter-queue.service is the authoritative end gate.
+raster_path_present() {
+  have driverless && return 0
+  if have lpinfo && lpinfo -m 2>/dev/null | grep -q 'everywhere'; then return 0; fi
+  local b f
+  b=$(cups_serverbin) || return 1
+  for f in gstoraster pdftoraster rastertopwg pdftopdf; do
+    [[ -x $b/filter/$f ]] && return 0
+  done
+  return 1
+}
 
 # ---- args --------------------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -219,22 +316,35 @@ if [[ $CMD != _kit-experimental ]]; then
 fi
 
 preflight() {
+  detect_distro
   local c
-  for c in systemctl lpadmin lpstat cupsenable cupsaccept rfkill curl install; do
-    have "$c" || die "missing $c (base packages cups, util-linux, curl)"
+  # Hard requirements: without these the installer itself cannot run.
+  for c in systemctl lpadmin lpstat install curl; do
+    have "$c" || die "missing '$c' — install $(pkg_hint "$(dep_of "$c")")"
   done
-  if [[ -d /sys/fs/selinux ]]; then have restorecon || die "missing restorecon (base package policycoreutils)"; fi
-  ok "tools present"
-  [[ -x $CUPS_FILTERS/pdftopdf && -x $CUPS_FILTERS/rastertopwg ]] || die "cups-filters incomplete: need $CUPS_FILTERS/{pdftopdf,rastertopwg}"
-  [[ -x $CUPS_FILTERS/gstoraster || -x $CUPS_FILTERS/pdftoraster ]] || die "cups-filters incomplete: need gstoraster or pdftoraster"
-  ok "cups-filters chain present"
-  systemctl is-active --quiet cups || { systemctl start cups || die "cannot start cups"; }
+  ok "core tools present"
+  # Best-effort helpers: the daemon/queue tolerate their absence, so warn (don't die).
+  for c in cupsenable cupsaccept rfkill; do
+    have "$c" || warn "'$c' not found (best-effort only) — install $(pkg_hint "$(dep_of "$c")")"
+  done
+  if [[ -d /sys/fs/selinux ]]; then
+    have restorecon || warn "SELinux is on but 'restorecon' is missing — install $(pkg_hint policycoreutils)"
+  fi
+  # cupsd: try the service, then socket-activation (Debian/Ubuntu ship cups.socket), then poll.
+  systemctl is-active --quiet cups 2>/dev/null || systemctl start cups 2>/dev/null \
+    || systemctl start cups.socket 2>/dev/null \
+    || die "cannot start CUPS — install $(pkg_hint cups), then: systemctl start cups"
   for _ in $(seq 1 15); do
     if lpstat -r 2>/dev/null | grep -q 'is running'; then break; fi
     sleep 1
   done
   lpstat -r 2>/dev/null | grep -q 'is running' || die "cupsd did not come up (systemctl status cups)"
   ok "cupsd running"
+  # Not fatal: ensure_queue falls back driverless -> `-m everywhere`, and the queue step is the real gate.
+  if raster_path_present; then ok "driverless/everywhere print path available"
+  else warn "no driverless/everywhere raster path detected — printing may not render; install $(pkg_hint cups-filters)"; fi
+  # ---- Bluetooth (best-effort; the daemon starts even without an adapter) ----
+  systemctl cat bluetooth.service >/dev/null 2>&1 || warn "bluetooth.service not found — install $(pkg_hint bluez)"
   systemctl is-enabled --quiet bluetooth 2>/dev/null || systemctl enable bluetooth >/dev/null 2>&1 || true
   systemctl is-active --quiet bluetooth || systemctl start bluetooth || warn "bluetooth.service failed to start"
   if rfkill list bluetooth 2>/dev/null | grep -q 'Soft blocked: yes'; then warn "Bluetooth soft-blocked — unblocking"; rfkill unblock bluetooth || true; fi
@@ -260,7 +370,10 @@ remove_old_user_units() {
 fetch_kit() {
   local tag=$1 url arch sum
   arch=$(uname -m)
-  [[ $arch == x86_64 ]] || die "no kit is published for $arch (x86_64 only)"
+  case "$arch" in
+    x86_64|aarch64) ;;
+    *) die "no prebuilt kit for $arch — build from source: cargo build --release, then $0 install --binary target/release/catprinterd" ;;
+  esac
   TMPD=$(mktemp -d /tmp/catprinter-kit.XXXXXX)
   if [[ $tag == latest ]]; then url="$REPO_RELEASES/latest/download"; else url="$REPO_RELEASES/download/$tag"; fi
   echo "  downloading $url/catprinter-kit-$arch.tar.gz"
@@ -488,7 +601,7 @@ do_install() {
   systemctl restart catprinter-queue || true
   if ! systemctl is-active --quiet catprinter-queue; then
     journalctl -u catprinter-queue -n 20 --no-pager >&2 || true
-    die "lpadmin -m everywhere failed — is the daemon answering on :$PORT?"
+    die "queue creation failed — is the daemon answering on :$PORT, and is cups-filters installed ($(pkg_hint cups-filters))?"
   fi
   ok "CUPS queue $QUEUE points at $URI"
   echo

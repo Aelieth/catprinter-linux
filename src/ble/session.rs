@@ -681,7 +681,7 @@ async fn try_le_connect(
         };
         match bluez::connect_device_outcome(ok, name.as_deref(), &message, timed_out) {
             bluez::ConnectDeviceOutcome::CreatedLe => {
-                let path = created.expect("CreatedLe has a path");
+                let path = bluez::created_le_path(created);
                 return finish_le_object(conn, &path, true).await;
             }
             bluez::ConnectDeviceOutcome::NeedExperimental => {

@@ -870,6 +870,7 @@ impl IppService {
                 "orientation-requested",
                 "output-bin",
                 "print-color-mode",
+                "print-content-optimize",
                 "print-quality",
                 "print-scaling",
                 "printer-resolution",
@@ -984,6 +985,10 @@ impl IppService {
             Tmpl,
             v_kws(&["bi-level", "monochrome"]),
         );
+        // IPP Everywhere wants these; only `auto` so CUPS does not grow a second Text/Photo/Graphics
+        // menu. ensure-queue also strips any leftover *print-content-optimize OpenUI from the PPD.
+        put("print-content-optimize-default", Tmpl, v_kw("auto"));
+        put("print-content-optimize-supported", Tmpl, v_kw("auto"));
         put("print-quality-default", Tmpl, v_enum(4));
         put("print-quality-supported", Tmpl, v_enums(&[3, 4, 5]));
         put("print-rendering-intent-default", Tmpl, v_kw("auto"));

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 — 2026-08-19
+
+Cross-distro and cross-desktop: the kit now installs and runs on any systemd + CUPS distro
+(Fedora/RHEL/openSUSE, Debian/Ubuntu, Arch), not just Immutable Fedora. `src/` was already
+portable; the Fedora coupling lived in packaging, docs and tests.
+
+- **`install.sh` preflight no longer hard-fails off Fedora** — and could already mis-fire *on*
+  Fedora. It located CUPS filters via `cups-config` (usually absent at runtime) with a
+  `/usr/lib/cups` fallback that is wrong on 64-bit Fedora/RHEL/openSUSE (`/usr/lib64/cups`), then
+  required standalone filter binaries (`pdftopdf`/`rastertopwg`/`gstoraster`) that cups-filters
+  2.x / CUPS 3.x reorganize or drop. Now: a robust serverbin locator (lib/lib64/libexec), the
+  filter check is a warning (`catprinter-queue.service` is the authoritative gate), and cupsd
+  start tries `cups.service` then `cups.socket`.
+- **Distro-aware errors** — `install.sh` reads `/etc/os-release` and prints the exact
+  `dnf`/`apt`/`pacman`/`zypper install …` command for a missing dependency. It still never
+  installs packages itself (immutable-first; on ostree a runtime install would not apply anyway).
+- Prebuilt kits for **x86_64** and **aarch64** (both glibc ≥ 2.35; aarch64 kit is built and
+  tested on `ubuntu-22.04-arm`). Other arches get a source-build hint.
+- `catprinter.service` documents that `RestartSteps`/`RestartMaxDelaySec` need systemd v254+ and
+  degrade gracefully below it; `make check`'s unit verify tolerates that warning (Debian 12 /
+  Ubuntu 22.04 ship systemd 252 / 249).
+- **Fleet test on Fedora + Debian + Arch** — real systemd-in-podman boot + a print through CUPS,
+  via per-distro provisioners (`tests/fleet/provision/*.sh`) and `FLEET_DISTRO`; `make
+  fleet-test-all` runs the set. CI matrix gates on Fedora + Debian, Arch informational.
+- Docs: per-distro prerequisites in README (in the cat's own voice 🐈) and KIT-README; honest
+  arch/glibc floor.
+- Print dialog: a pinned classic printer (`CATPRINTER_MODEL=classic`) advertises **Cat Printer
+  Classic** instead of misreporting **MXW01**; `mxw01`/`auto` unchanged.
+- Tidy: `[lints.clippy] all = deny` so a plain local `cargo clippy` matches CI's `-D warnings`
+  (clippy-only, so a distro packager's `cargo build` is unaffected); drop a redundant `serde_json`
+  dev-dep and a redundant `#[allow]`; the version test asserts semver shape instead of a
+  hardcoded string; shared `bluez::created_le_path` helper; `main.rs` gains a module doc.
+
 ## 0.3.2 — 2026-08-18
 
 Document is a **full A4 / Letter page**, then the daemon shrinks that entire
@@ -27,9 +60,9 @@ white. Jobs log quality, color-mode, preset, tone, and layout.
 `Choice/Human name`, not `printer-strings-uri`). CUPS `-m everywhere` left
 Draft/Normal/High, Stationery/Labels, and `48x297mm`. Duplicate
 `Cat_Printer` queues that point at the same loopback URI are removed.
-`print-content-optimize` is no longer advertised (and is stripped from the
-PPD) so GTK does not show a second **Print Optimization** menu with Text /
-Photo / Graphics next to **Print style**.
+`print-content-optimize` is advertised as **`auto` only** (IPP Everywhere still
+wants the attributes) and stripped from the PPD so GTK does not show a second
+**Print Optimization** menu with Text / Photo / Graphics next to **Print style**.
 
 Minidoc/Sheet trims **left/right** white (not top/bottom) so Gwenview/KDE's
 ~0.17 in dialog margins do not shrink type; title stays at the top, last line

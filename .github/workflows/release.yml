@@ -58,18 +58,30 @@ jobs:
           test -s relnotes.md
           cat relnotes.md
 
-      # The `dist` artifact is the one the fleet test just booted — publish exactly those bytes.
+      # x86_64 `dist` is the fleet-tested kit; `dist-aarch64` is the native ARM kit (same glibc 2.35).
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: .
 
-      - name: Unbundle and verify the tested kit
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-aarch64
+          path: .
+
+      - name: Unbundle and verify the tested kits
         run: |
+          set -euo pipefail
           tar -xzf dist.tar.gz
+          mkdir -p /tmp/arm
+          tar -xzf dist-aarch64.tar.gz -C /tmp/arm
+          cp /tmp/arm/catprinter-kit-*.tar.gz dist/
+          cat /tmp/arm/SHA256SUMS >> dist/SHA256SUMS
           ls -la dist/
           cat dist/SHA256SUMS
           echo "VERSION: $(cat dist/catprinter-kit/VERSION)"
+          grep -q 'catprinter-kit-x86_64.tar.gz' dist/SHA256SUMS
+          grep -q 'catprinter-kit-aarch64.tar.gz' dist/SHA256SUMS
           (cd dist && sha256sum -c SHA256SUMS)
 
       - name: Publish release assets

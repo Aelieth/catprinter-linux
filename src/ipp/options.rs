@@ -136,7 +136,7 @@ impl JobOptions {
             ("monochrome", Preset::Picture) => Tone::Grayscale,
             _ => Tone::BlackWhite, // bi-level, auto, or Gray+Default/Text
         };
-        // Minidoc is paper size: whole-page Sheet, no trim. Style stays Text/Default/Picture.
+        // Minidoc is paper size: whole-page Sheet (trim left/right white only). Style stays Text/Default/Picture.
         let sheet = !is_image && self.is_sheet_media();
         o.preset = preset;
         o.tone = tone;

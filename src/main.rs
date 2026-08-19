@@ -1,3 +1,6 @@
+//! `catprinterd` binary: parse the CLI, set up tracing, and dispatch to `commands::*`. All the logic
+//! lives in the `catprinterd` library crate.
+
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 

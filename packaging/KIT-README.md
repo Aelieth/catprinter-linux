@@ -14,10 +14,20 @@ hardware here). The model is autodetected when printing — buy a new one, it ju
 
 **Kid contract:** Bluetooth on, printer on, print. No pairing, no MAC addresses, no per-user setup.
 
-**Immutable-first:** nothing is layered into rpm-ostree. The kit writes only to `/usr/local`
-(= `/var/usrlocal`, writable and persistent across upgrades/rebases) and `/etc`, and needs only
-base-image packages: `cups`, `cups-filters`, `bluez`, `util-linux` (rfkill), `policycoreutils`
-(restorecon), `curl`; `avahi` optional (discovery).
+**Runs on any systemd + CUPS distro** (Fedora/RHEL/openSUSE, Debian/Ubuntu, Arch), and is
+immutable-first on ostree images: nothing is layered into rpm-ostree; the kit writes only to
+`/usr/local` (= `/var/usrlocal`, writable and persistent across upgrades/rebases) and `/etc`. It
+never installs packages — a missing one prints the exact command for your distro. Prerequisites:
+
+| Distro | packages |
+|---|---|
+| Fedora / RHEL / openSUSE | `cups cups-filters bluez avahi util-linux policycoreutils curl` |
+| Debian / Ubuntu | `cups cups-filters cups-ipp-utils bluez avahi-daemon avahi-utils rfkill curl` |
+| Arch | `cups cups-filters bluez bluez-utils avahi util-linux curl` |
+
+`avahi` optional (discovery); `driverless` optional (the queue falls back to `lpadmin -m everywhere`);
+`policycoreutils` only where SELinux is enabled. Prebuilt `--download` kits are **x86_64** and
+**aarch64** (glibc ≥ 2.35). Other arches: `cargo build --release` then `install --binary`.
 
 ## Install (admin, once per machine)
 
@@ -74,17 +84,18 @@ block at the end of `env.example`; each maps to a `catprinterd serve --help` fla
 
 ## In the print dialog
 
-* Printer: **CatPrinter** (never the default — a 48 mm tape must not receive homework by accident).
-* **Media**: **Cat Tape short** (default) · Cat Tape long · **Cat Minidoc A4** /
-  Cat Minidoc Letter (true A4 / Letter so the app emits a full page; we shrink that
-  whole raster to 384 dots, leftover left/right white only) · Custom (48 mm × up to 5000 mm).
-* **Print quality**: **Default** (drawings) · Text (sharp glyphs) · Picture (hotter dither).
-  Style applies on tape and on Minidoc.
-* **Color / tone**: **Black and white** (default, fast 1-bit) · Grayscale. 16-level (slower)
-  only for **Picture + Grayscale**.
-* **Paper type**: Paper · Sticker (label only; same burn).
-* Anything CUPS can print prints: PDF, text, PNG/JPEG, LibreOffice, browsers, n-up, copies.
-  `.webp` is not a CUPS type — convert first.
+Printer: **CatPrinter** (never the system default). Same names on every distro.
+
+| Setting | Choices |
+|---|---|
+| **Paper** | **Cat Tape short** (default) · Cat Tape long · **Cat Minidoc A4** · Cat Minidoc Letter · custom 48×(25–5000) mm |
+| **Print style** | **Default** · Text · Picture (not Draft/Normal/High; no Print Optimization menu) |
+| **Tone** | **Black and white** (default, fast) · Grayscale (**Picture + Grayscale** = photo path, slower) |
+| **Paper type** | Paper · Sticker (label only) |
+
+Tape fills the 384-dot head. Minidoc is a full A4/Letter page shrunk to 384 dots (left/right white trimmed).
+Anything CUPS can print prints: PDF, text, PNG/JPEG, LibreOffice, browsers, n-up, copies.
+`.webp` is not a CUPS type — convert first.
 
 ## Troubleshooting
 

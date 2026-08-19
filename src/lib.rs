@@ -27,9 +27,23 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {
+    // VERSION is single-sourced from Cargo.toml (see above), so assert only its SHAPE — a release bump
+    // then never needs a test edit. Kit/fleet validators read field 1 of "<semver> <sha> <utc>".
     #[test]
-    fn crate_version_is_0_3_2() {
-        assert_eq!(crate::VERSION, "0.3.2");
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.2");
+    fn crate_version_is_semver() {
+        let parts: Vec<&str> = crate::VERSION.split('.').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "VERSION should be x.y.z, got {:?}",
+            crate::VERSION
+        );
+        assert!(
+            parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "VERSION fields should be numeric, got {:?}",
+            crate::VERSION
+        );
     }
 }

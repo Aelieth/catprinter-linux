@@ -29,7 +29,17 @@ KIT=${KIT:-$ROOT/dist/catprinter-kit}
 IMAGE_ROOT=${IMAGE_ROOT:-$ROOT/dist/image-root}
 OUT=$ROOT/tests/out/fleet
 CTX=$OUT/ctx
-IMG=${FLEET_IMAGE:-catprinter-fleet}
+# Distro under test (fedora|debian|arch). Each is a real systemd-in-podman boot + CUPS print; the
+# phase logic and assertions are distro-neutral. FLEET_BASE overrides the base image.
+FLEET_DISTRO=${FLEET_DISTRO:-fedora}
+case "$FLEET_DISTRO" in
+  fedora) FLEET_BASE=${FLEET_BASE:-registry.fedoraproject.org/fedora:44} ;;
+  debian) FLEET_BASE=${FLEET_BASE:-docker.io/debian:12} ;;
+  arch)   FLEET_BASE=${FLEET_BASE:-docker.io/archlinux:latest} ;;
+  *) printf 'fleet-test: unknown FLEET_DISTRO=%s (fedora|debian|arch)\n' "$FLEET_DISTRO" >&2; exit 1 ;;
+esac
+IMG=${FLEET_IMAGE:-catprinter-fleet-$FLEET_DISTRO}   # image tag, namespaced so distro runs never collide
+CPFX=catprinter-fleet-$FLEET_DISTRO                  # container-name prefix, likewise
 KEEP=${KEEP:-0}
 FLEET_FIRST_BOOT=${FLEET_FIRST_BOOT:-0}
 FLEET_DOWNLOAD=${FLEET_DOWNLOAD:-}
@@ -79,6 +89,9 @@ wait_for() {
   fail "$msg (timeout ${n}s)"; LAST=1; return 0
 }
 out1() { xs "$1" 2>/dev/null | head -n1 || true; }        # first line of a snippet's stdout, never fails
+# Debian/Ubuntu usr-merge reports image units under /lib/systemd/system (a symlink to /usr/lib/...);
+# normalise the leading dir so FragmentPath / wants-target assertions are distro-agnostic.
+norm_unit_path() { case "$1" in /lib/systemd/system/*) printf '/usr%s' "$1" ;; *) printf '%s' "$1" ;; esac; }
 
 collect() {
   local c=$1
@@ -128,8 +141,10 @@ start() {
 }
 
 build_image() {  # build_image TAG IMAGE_BAKED
-  local log=$OUT/build-$1.log
-  if ! "${P[@]}" build -t "$IMG:$1" --build-arg "IMAGE_BAKED=$2" -f "$CTX/Containerfile" "$CTX" >"$log" 2>&1; then
+  local log=$OUT/build-$FLEET_DISTRO-$1.log
+  if ! "${P[@]}" build -t "$IMG:$1" \
+      --build-arg "IMAGE_BAKED=$2" --build-arg "DISTRO=$FLEET_DISTRO" --build-arg "BASE=$FLEET_BASE" \
+      -f "$CTX/Containerfile" "$CTX" >"$log" 2>&1; then
     tail -n 40 "$log" >&2; die "podman build $IMG:$1 failed (see $log)"
   fi
 }
@@ -139,8 +154,8 @@ check_daemon_and_queue() {  # $1 = label, $2 = expected FragmentPath dir (/usr/l
   local label=$1 frag=$2
   wait_for 30 "$label: catprinter.service active" xs 'systemctl is-active catprinter.service | grep -qx active'
   wait_for 90 "$label: catprinter-queue.service active" xs 'systemctl is-active catprinter-queue.service | grep -qx active'
-  assert_eq "$label: catprinter FragmentPath" "$(out1 'systemctl show -p FragmentPath --value catprinter.service')" "$frag/catprinter.service"
-  assert_eq "$label: catprinter-queue FragmentPath" "$(out1 'systemctl show -p FragmentPath --value catprinter-queue.service')" "$frag/catprinter-queue.service"
+  assert_eq "$label: catprinter FragmentPath" "$(norm_unit_path "$(out1 'systemctl show -p FragmentPath --value catprinter.service')")" "$frag/catprinter.service"
+  assert_eq "$label: catprinter-queue FragmentPath" "$(norm_unit_path "$(out1 'systemctl show -p FragmentPath --value catprinter-queue.service')")" "$frag/catprinter-queue.service"
   wait_for 30 "$label: /health answers" xs "curl -fsS 127.0.0.1:$PORT/health >/dev/null"
   capture xs "curl -fsS 127.0.0.1:$PORT/health"
   if [[ $OUTPUT == *"\"version\": \"$SEMVER\""* || $OUTPUT == *"\"version\":\"$SEMVER\""* ]]; then pass "$label: /health has version $SEMVER"; else fail "$label: /health lacks version $SEMVER: $(printf '%s' "$OUTPUT" | tr '\n' ' ' | cut -c1-200)"; fi
@@ -164,7 +179,7 @@ done
 mkdir -p "$OUT"
 rm -f "$OUT"/*.log
 
-say "fleet-test: semver $SEMVER, kit VERSION '$(head -n1 "$KIT/VERSION")', podman='$PODMAN'"
+say "fleet-test [$FLEET_DISTRO]: semver $SEMVER, kit VERSION '$(head -n1 "$KIT/VERSION")', podman='$PODMAN'"
 [[ $(cut -d' ' -f1 "$KIT/VERSION") == "$SEMVER" ]] || die "kit VERSION field 1 is not $SEMVER: $(head -n1 "$KIT/VERSION")"
 # The wants symlinks are a property under test (phase 1 fails without them), not a harness input.
 # -L: they dangle on the build host (absolute targets inside the image).
@@ -173,19 +188,20 @@ for u in catprinter.service catprinter-queue.service; do
 done
 
 # ---- build the two images ------------------------------------------------------------------------
-say "building $IMG:image and $IMG:plain (context $CTX)"
+say "building $IMG:image and $IMG:plain — $FLEET_DISTRO ($FLEET_BASE), context $CTX"
 rm -rf "$CTX"; mkdir -p "$CTX/fixtures"
 cp -a "$KIT" "$CTX/kit"
 cp -a "$IMAGE_ROOT" "$CTX/image-root"
 cp tests/fixtures/text-roll48.pwg "$CTX/fixtures/"
 cp tests/fleet/Containerfile "$CTX/Containerfile"
+cp -a tests/fleet/provision "$CTX/provision"
 build_image image 1
 build_image plain 0
 note "images built ($(( $(date +%s) - T_START ))s; logs $OUT/build-*.log)"
 
 # =================================================================================================
 say "phase 1 — image-baked machine, rebase case (no first boot, no presets)"
-start image catprinter-fleet-image
+start image "$CPFX-image"
 if [[ $LAST -ne 0 ]]; then
   fail "phase 1: machine did not boot — skipping the phase"
 else
@@ -198,7 +214,7 @@ else
   # 2. enabled purely by the shipped wants symlinks
   assert_eq "catprinter is-enabled" "$(out1 'systemctl is-enabled catprinter.service')" enabled
   assert_eq "catprinter-queue is-enabled" "$(out1 'systemctl is-enabled catprinter-queue.service')" enabled
-  assert_eq "wants symlink target" "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')" /usr/lib/systemd/system/catprinter.service
+  assert_eq "wants symlink target" "$(norm_unit_path "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')")" /usr/lib/systemd/system/catprinter.service
   # 3–5. daemon, health, queue — zero per-machine steps
   check_daemon_and_queue "boot" /usr/lib/systemd/system
   # 6. nothing was written to /etc by anyone
@@ -242,14 +258,14 @@ else
   assert "/usr/lib/systemd/system/catprinter.service kept" x test -f /usr/lib/systemd/system/catprinter.service
   assert "$IMG_SH install --yes again exit 0" x "$IMG_SH" install --yes
   check_daemon_and_queue "after re-install" /usr/lib/systemd/system
-  assert_eq "wants symlink target after re-install" "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')" /usr/lib/systemd/system/catprinter.service
+  assert_eq "wants symlink target after re-install" "$(norm_unit_path "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')")" /usr/lib/systemd/system/catprinter.service
   assert "$IMG_SH status exit 0 at the end" x "$IMG_SH" status
   assert_has "status header" "image-baked install"
 fi
 
 # =================================================================================================
 say "phase 2 — kit path on a plain machine, then kit -> image migration"
-start plain catprinter-fleet-plain
+start plain "$CPFX-plain"
 if [[ $LAST -ne 0 ]]; then
   fail "phase 2: machine did not boot — skipping the phase"
 else
@@ -305,8 +321,8 @@ else
   assert "kit unit removed" x test ! -e /etc/systemd/system/catprinter.service
   assert "kit queue unit removed" x test ! -e /etc/systemd/system/catprinter-queue.service
   assert "kit share dir removed" x test ! -d /usr/local/share/catprinter
-  assert_eq "wants symlink -> image unit" "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')" /usr/lib/systemd/system/catprinter.service
-  assert_eq "queue wants symlink -> image unit" "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter-queue.service')" /usr/lib/systemd/system/catprinter-queue.service
+  assert_eq "wants symlink -> image unit" "$(norm_unit_path "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter.service')")" /usr/lib/systemd/system/catprinter.service
+  assert_eq "queue wants symlink -> image unit" "$(norm_unit_path "$(out1 'readlink /etc/systemd/system/multi-user.target.wants/catprinter-queue.service')")" /usr/lib/systemd/system/catprinter-queue.service
   check_daemon_and_queue "after migration" /usr/lib/systemd/system
   assert "$IMG_SH status exit 0 after migration" x "$IMG_SH" status
   assert_has "status header after migration" "image-baked install"
@@ -335,7 +351,7 @@ if [[ $FLEET_FIRST_BOOT == 1 ]]; then
   # log-independent proof of a first boot ("Populated /etc with preset unit settings." itself is
   # logged before journald exists and never reaches the container journal).
   CMDLINE="systemd.condition_first_boot=1 systemd.firstboot=off" \
-    start image catprinter-fleet-firstboot --entrypoint /bin/sh \
+    start image "$CPFX-firstboot" --entrypoint /bin/sh \
     -- -c 'rm -f /etc/machine-id /etc/systemd/system/multi-user.target.wants/catprinter.service /etc/systemd/system/multi-user.target.wants/catprinter-queue.service; exec /sbin/init'
   if [[ $LAST -ne 0 ]]; then
     fail "phase 3: machine did not boot — skipping the phase"

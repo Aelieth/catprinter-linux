@@ -5,7 +5,16 @@ BUILD_DATE := $(shell date -u +%FT%TZ)
 # Canonical VERSION line, byte-identical in the kit and in the image: "<semver> <git-sha|nogit> <build-utc>".
 # Field 1 is always the semver (fleet validators: `cut -d' ' -f1`).
 VERSION_LINE = $(VERSION) $(GIT_SHA) $(BUILD_DATE)
-ARCH    := x86_64
+# Native kit arch (`uname -m`). Cross: `make kit ARCH=aarch64 CARGO_TARGET=aarch64-unknown-linux-gnu`.
+ARCH ?= $(shell uname -m)
+CARGO_TARGET ?=
+ifeq ($(CARGO_TARGET),)
+BIN_DIR := target/release
+CARGO_TARGET_FLAG :=
+else
+BIN_DIR := target/$(CARGO_TARGET)/release
+CARGO_TARGET_FLAG := --target $(CARGO_TARGET)
+endif
 KIT     := dist/catprinter-kit
 TARBALL := dist/catprinter-kit-$(VERSION)-$(ARCH).tar.gz
 KIT_FILES := packaging/install.sh packaging/catprinter.service packaging/catprinter-queue.service \
@@ -17,27 +26,29 @@ IPPTOOL_TESTS := /usr/share/cups/ipptool
 # From a distrobox: make fleet-test PODMAN="distrobox-host-exec podman" (rootless works too).
 FLEET_PODMAN ?= $(shell if [ "$$(id -u)" = 0 ]; then echo podman; else echo "sudo podman"; fi)
 
-.PHONY: help version build check test lint kit image-files fleet-test fixtures install ipptool musl clean
+.PHONY: help version build check test lint kit kit-aarch64 image-files fleet-test fleet-test-all fixtures install ipptool musl clean
 
 help:
 	@printf '%s\n' \
 	  'build        cargo build --release --locked' \
 	  'check        fmt --check, clippy -D warnings, tests, shell lint (install.sh, fleet-test.sh), unit verify' \
 	  'test         cargo test --locked' \
-	  'kit          dist/catprinter-kit/ + $(TARBALL) + dist/SHA256SUMS' \
+	  'kit          dist/catprinter-kit/ + $(TARBALL) + dist/SHA256SUMS (ARCH=$(ARCH))' \
 	  'image-files  DEST=dir  files for an image build: /usr/bin, /usr/lib/systemd/system (+wants symlinks), preset, udev, /usr/lib/catprinter' \
-	  'fleet-test   boot the kit and the image files in systemd containers (PODMAN="$(FLEET_PODMAN)"; KEEP=1, FLEET_FIRST_BOOT=1)' \
+	  'fleet-test   boot the kit and the image files in systemd containers (FLEET_DISTRO=fedora|debian|arch; PODMAN="$(FLEET_PODMAN)"; KEEP=1, FLEET_FIRST_BOOT=1)' \
+	  'fleet-test-all  run fleet-test on fedora, debian and arch in turn' \
 	  'ipptool      run the IPP Everywhere suite against a fake-printer daemon (needs ipptool)' \
 	  'fixtures     regenerate tests/fixtures/*.pwg with the host CUPS filters' \
 	  'install      sudo dist/catprinter-kit/install.sh install' \
 	  'musl         static build for x86_64-unknown-linux-musl' \
+	  'kit-aarch64  cross kit for aarch64 (needs gcc-aarch64-linux-gnu, or a native arm host)' \
 	  'version      print the crate version'
 
 version:
 	@echo $(VERSION)
 
 build:
-	cargo build --release --locked
+	cargo build --release --locked $(CARGO_TARGET_FLAG)
 
 test:
 	cargo test --locked
@@ -49,8 +60,10 @@ lint:
 	bash -n scripts/fleet-test.sh
 	@if command -v shellcheck >/dev/null 2>&1; then shellcheck -S warning packaging/install.sh scripts/fleet-test.sh; else echo "shellcheck not installed — skipped"; fi
 	@if command -v systemd-analyze >/dev/null 2>&1; then \
-	  out=$$(systemd-analyze verify packaging/catprinter.service packaging/catprinter-queue.service 2>&1 | grep -Ev 'catprinterd.*(not executable|No such file)' || true); \
-	  if [ -n "$$out" ]; then printf '%s\n' "$$out"; echo "systemd-analyze verify: unexpected findings (only the missing-binary lines are tolerated)"; exit 1; fi; \
+	  out=$$(systemd-analyze verify packaging/catprinter.service packaging/catprinter-queue.service 2>&1 \
+	    | grep -Ev 'catprinterd.*(not executable|No such file)' \
+	    | grep -Ev "Unknown (key name|lvalue).*(RestartSteps|RestartMaxDelaySec)" || true); \
+	  if [ -n "$$out" ]; then printf '%s\n' "$$out"; echo "systemd-analyze verify: unexpected findings (missing-binary + pre-254 restart keys tolerated)"; exit 1; fi; \
 	else echo "systemd-analyze not installed — unit verify skipped"; fi
 	packaging/install.sh --help >/dev/null
 
@@ -69,7 +82,7 @@ ipptool: build
 
 kit: build
 	rm -rf $(KIT) && mkdir -p $(KIT)
-	cp target/release/catprinterd $(KIT)/
+	cp $(BIN_DIR)/catprinterd $(KIT)/
 	cp $(KIT_FILES) $(KIT)/
 	cp packaging/KIT-README.md $(KIT)/README.md
 	printf '%s\n' "$(VERSION_LINE)" > $(KIT)/VERSION
@@ -84,8 +97,12 @@ kit: build
 # preset alone only fires on a true first boot, not on a rebase), preset, and /usr/lib/catprinter/
 # {env.example,install.sh,VERSION} (install.sh keeps managing /etc/catprinter/env on the machine).
 # DEST is only ever added to — never wiped.
+# Cross kit from an x86_64 host (CI uses a native ubuntu-22.04-arm runner instead).
+kit-aarch64:
+	$(MAKE) kit ARCH=aarch64 CARGO_TARGET=aarch64-unknown-linux-gnu
+
 image-files: build
-	install -D -m 0755 target/release/catprinterd $(DEST)/usr/bin/catprinterd
+	install -D -m 0755 $(BIN_DIR)/catprinterd $(DEST)/usr/bin/catprinterd
 	install -d $(DEST)/usr/lib/systemd/system $(DEST)/etc/systemd/system/multi-user.target.wants
 	for u in catprinter.service catprinter-queue.service; do \
 	  sed 's#^ExecStart=/usr/local/bin/catprinterd#ExecStart=/usr/bin/catprinterd#' packaging/$$u > $(DEST)/usr/lib/systemd/system/$$u && chmod 0644 $(DEST)/usr/lib/systemd/system/$$u; \
@@ -102,7 +119,14 @@ image-files: build
 
 # Real systemd-in-podman boot of both install paths (image-baked rebase case, kit + kit->image migration).
 fleet-test: kit image-files
-	PODMAN="$(if $(PODMAN),$(PODMAN),$(FLEET_PODMAN))" scripts/fleet-test.sh
+	FLEET_DISTRO="$(if $(FLEET_DISTRO),$(FLEET_DISTRO),fedora)" PODMAN="$(if $(PODMAN),$(PODMAN),$(FLEET_PODMAN))" scripts/fleet-test.sh
+
+# The same, across every supported distro family (sequential; each ~3 min warm).
+fleet-test-all: kit image-files
+	@for d in fedora debian arch; do \
+	  printf '\n=== fleet-test FLEET_DISTRO=%s ===\n' "$$d"; \
+	  FLEET_DISTRO="$$d" PODMAN="$(if $(PODMAN),$(PODMAN),$(FLEET_PODMAN))" scripts/fleet-test.sh || exit $$?; \
+	done
 
 fixtures:
 	scripts/make-fixtures.sh

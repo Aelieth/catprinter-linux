@@ -116,8 +116,8 @@ fn http_body(resp: &str) -> &str {
 }
 
 #[test]
-fn shipped_binary_version_is_0_3_2() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.2");
+fn shipped_binary_version_matches_crate() {
+    let v = env!("CARGO_PKG_VERSION");
     let out = Command::new(env!("CARGO_BIN_EXE_catprinterd"))
         .arg("--version")
         .output()
@@ -130,7 +130,7 @@ fn shipped_binary_version_is_0_3_2() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         text.trim(),
-        "catprinterd 0.3.2",
+        format!("catprinterd {v}"),
         "stdout={text:?} stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -145,7 +145,7 @@ fn health_and_status_page() {
         .unwrap_or_else(|e| panic!("live /health is not JSON ({e}): {json}"));
     assert_eq!(
         v.get("version").and_then(|x| x.as_str()),
-        Some("0.3.2"),
+        Some(env!("CARGO_PKG_VERSION")),
         "{json}"
     );
     assert_eq!(
@@ -155,7 +155,10 @@ fn health_and_status_page() {
     );
     let page = ureq_get(d.port, "/");
     assert!(page.contains("Cat Printer"));
-    assert!(page.contains("catprinterd 0.3.2"), "{page}");
+    assert!(
+        page.contains(&format!("catprinterd {}", env!("CARGO_PKG_VERSION"))),
+        "{page}"
+    );
     let strings = ureq_get(d.port, "/strings/en.strings");
     assert!(strings.contains("Cat Tape short"));
     assert!(strings.contains("Cat Minidoc A4"));

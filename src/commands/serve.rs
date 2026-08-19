@@ -70,6 +70,17 @@ fn systemd_notify_ready() {
     let _ = sock.send_to(payload, spec);
 }
 
+/// The advertised model token — the `printer-make-and-model` suffix, IPP device-id `MDL`, and the
+/// DNS-SD `ty`/`product`/`usb_MDL`. At serve time no printer is connected yet, so `auto` uses the
+/// verified, common MXW01; a pinned `classic` reports honestly ("Cat Printer Classic") instead of
+/// misreporting a non-MXW01 device as "MXW01".
+fn model_label_for(family: Option<crate::models::Family>) -> &'static str {
+    match family {
+        Some(crate::models::Family::Classic) => "Classic",
+        _ => "MXW01",
+    }
+}
+
 pub async fn run(args: ServeArgs) -> Result<()> {
     let shutdown = CancellationToken::new();
 
@@ -137,7 +148,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         .map(normalize_uuid)
         .unwrap_or_else(|| default_uuid(args.port));
     let uuid = Arc::new(RwLock::new(uuid));
-    let model_label = "MXW01".to_string();
+    let model_label = model_label_for(args.ble.model.family()).to_string();
     let pcfg = PrinterConfig {
         name: args.printer_name.clone(),
         info: format!("Cat Printer{}", if is_fake { " (fake)" } else { "" }),
@@ -302,4 +313,19 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         tracing::debug!("side tasks did not stop in time");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_label_for;
+    use crate::models::Family;
+
+    #[test]
+    fn model_label_reflects_pinned_family() {
+        // auto (no forced family) and mxw01 keep the verified, common default; a pinned classic
+        // reports honestly instead of misreporting "MXW01".
+        assert_eq!(model_label_for(None), "MXW01");
+        assert_eq!(model_label_for(Some(Family::Mxw01)), "MXW01");
+        assert_eq!(model_label_for(Some(Family::Classic)), "Classic");
+    }
 }

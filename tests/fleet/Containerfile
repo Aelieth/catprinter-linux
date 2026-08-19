@@ -1,6 +1,9 @@
 # Fleet-path test image (scripts/fleet-test.sh): a systemd "machine" that boots with podman
 # (--systemd=always --privileged) and holds the kit, the image-root files and a raster fixture.
 #
+#   BASE / DISTRO  select the distro; the per-distro provisioner (tests/fleet/provision/<distro>.sh)
+#                  installs the base packages, sets the fleet-like unit state (that distro's unit
+#                  names) and writes a fixed machine-id. Defaults: fedora.
 #   IMAGE_BAKED=1  -> the image-root files are baked in (what a uBlue image built from
 #                     `make image-files` looks like: /usr/bin/catprinterd, /usr/lib/systemd/system
 #                     units, multi-user.target.wants symlinks, preset, /usr/lib/catprinter/*)
@@ -8,27 +11,15 @@
 #                     (cp -an /image-root/. /) are exercised at run time.
 #
 # The build context is assembled by scripts/fleet-test.sh under tests/out/fleet/ctx/ (kit/,
-# image-root/, fixtures/) — never the repo root.
+# image-root/, fixtures/, provision/) — never the repo root.
 ARG BASE=registry.fedoraproject.org/fedora:44
 FROM ${BASE}
 
-# The same base packages a fleet machine has (see packaging/KIT-README.md); ghostscript comes with
-# cups-filters (gstoraster). systemd + dbus-broker make it bootable.
-RUN dnf -y install --setopt=install_weak_deps=False \
-      systemd dbus-broker dbus-common cups cups-client cups-filters bluez avahi avahi-tools \
-      util-linux policycoreutils curl iproute procps-ng \
- && dnf clean all
-
-# Fleet-like unit state: cupsd socket-activated (cups.service disabled — catprinter-queue.service
-# Wants= it anyway), avahi on, no interactive first-boot wizard.
-RUN systemctl enable cups.socket cups.path dbus-broker.service avahi-daemon.service \
- && systemctl disable cups.service \
- && systemctl mask systemd-firstboot.service
-
-# A deployed machine has a machine-id => this is NOT a first boot => presets are NOT applied.
-# That is the rebase case: only the shipped multi-user.target.wants symlinks enable the units.
-# (fleet-test.sh's opt-in first-boot variant removes this file again before booting.)
-RUN echo 8f5f8b7c2c8e4a7d9e2b1c3d4e5f6a7b > /etc/machine-id
+# Distro-specific provisioning (packages + fleet-like unit state + fixed machine-id). Run via `sh` so
+# the build does not depend on the copied file keeping its executable bit.
+ARG DISTRO=fedora
+COPY provision/ /provision/
+RUN sh /provision/${DISTRO}.sh
 
 COPY kit/        /kit/
 COPY image-root/ /image-root/

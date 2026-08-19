@@ -686,6 +686,12 @@ pub enum ConnectDeviceOutcome {
     Error,
 }
 
+/// The object path `ConnectDevice` created. Present exactly when the outcome is
+/// [`ConnectDeviceOutcome::CreatedLe`] (`ok && !timed_out`), so both callers share one invariant.
+pub fn created_le_path(created: Option<String>) -> String {
+    created.expect("CreatedLe outcome always carries the created object path")
+}
+
 /// Classify a ConnectDevice result. `timed_out` is a local wall-clock timeout
 /// (no zbus error). `ok` is a returned object path.
 pub fn connect_device_outcome(

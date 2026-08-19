@@ -32,6 +32,9 @@ EnvironmentFile=-/etc/catprinter/env
 ExecStart=/usr/local/bin/catprinterd serve $CATPRINTERD_ARGS
 Restart=always
 RestartSec=2s
+# RestartSteps/RestartMaxDelaySec need systemd v254+; older systemd (Ubuntu 22.04 = 249, Debian 12 =
+# 252) logs one "Unknown key" warning and falls back to a flat RestartSec. StartLimitIntervalSec=0
+# above still means the service never gives up.
 RestartSteps=6
 RestartMaxDelaySec=60s
 # Let a long strip finish on SIGTERM (the daemon finishes/cancels the current job, then exits).

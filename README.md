@@ -11,7 +11,7 @@ Bluetooth Low Energy + BlueZ + combo wireless cards that secretly dislike cats +
 **catprinterd** is that program: a small, hardened Rust daemon that turns an MXW01 (and the GB0x / GT01 / MX0x / YT01 / X5 / X6 family) into a driverless **IPP Everywhere** printer on `127.0.0.1:8095`. CUPS treats it like any modern network printer. No PPD to install, no per-user setup, works for every account on the machine, and survives reboots without anyone logging in.
 
 ```
-File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──► catprinterd ──► Bluetooth LE ──► 🐈 *purrs and prints*
+File → Print ──► cupsd (cups-filters: your PDF/photo → PWG raster) ──► catprinterd ──► Bluetooth LE ──► 🐈 *purrs and prints*
 ```
 
 ### The Sacred Kid Contract 🤝
@@ -23,10 +23,20 @@ File → Print ──► cupsd (pdftopdf → gstoraster → rastertopwg) ──�
 No pairing. No MAC addresses. No phone apps. That is the entire contract.
 
 - **Hold-and-wait magic:** If the printer is off, the job waits (2 minutes by default) and the queue says *“Cat printer not found — turn it on and keep it near the computer.”* Switch it on → it prints. If the cat is already awake, the print should start in a few seconds — they nap after ~5–6 minutes of boredom, so a longer wait only blocks the queue.  
-- **Immutable-first:** One self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two systemd units, one env file. Nothing layered into rpm-ostree; runtime needs only base-image packages (`cups`, `cups-filters`, `bluez`, `util-linux`, `policycoreutils`, `curl`; `avahi` optional).  
+- **At home on any Linux:** One self-contained binary (glibc ≥ 2.35; built on ubuntu-22.04), two systemd units, one env file. The cat purrs on Fedora, Debian/Ubuntu, Arch, openSUSE — any systemd + CUPS distro — and is especially cozy on Immutable Fedora (nothing layered into rpm-ostree). Runtime treats: `cups`, `cups-filters`, `bluez`, `util-linux`/`rfkill`, `curl` (`avahi` optional; `policycoreutils` only where SELinux prowls). Per-distro shopping list in *Feed the cat first* below. 🍽️  
 - **Model autodetect:** MXW01 (16-level grayscale) or the classic family; a new printer simply works.
 
 ## Install (admin, once per machine) — Make the cat official
+
+**Feed the cat first** 🍽️ — the daemon needs a few treats from your package manager. It never installs them itself (a well-mannered cat doesn't raid the pantry); if one is missing, `install.sh` just prints the exact command for *your* distro.
+
+| Distro | one-time treats |
+|---|---|
+| Fedora / RHEL / openSUSE | `sudo dnf install cups cups-filters bluez avahi util-linux policycoreutils curl` |
+| Debian / Ubuntu | `sudo apt install cups cups-filters cups-ipp-utils bluez avahi-daemon avahi-utils rfkill curl` |
+| Arch | `sudo pacman -S cups cups-filters bluez bluez-utils avahi util-linux curl` |
+
+`avahi` is optional (it helps the cat introduce itself to the desktop); `policycoreutils` only matters where SELinux is on the prowl (Fedora/RHEL/openSUSE). Prebuilt kits are **x86_64** and **aarch64** (Raspberry Pi den 🐾 included). Anything else: `cargo build --release`, then `sudo ./install.sh --binary target/release/catprinterd`.
 
 Grab the kit (`make kit` → `dist/catprinter-kit/`, or the release tarball) and run:
 
@@ -45,16 +55,23 @@ Config knobs live in `/etc/catprinter/env` (see `packaging/env.example`): `CATPR
 
 ## In the print dialog — What will the cat eat today?
 
+File → Print, printer **CatPrinter**. Same CUPS/IPP dialog on Fedora, Debian/Ubuntu, Arch, and openSUSE after `install.sh`. Never make it the *system* default (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
+
+There is **no** extra “Print Optimization” menu (Text / Photo / Graphics). Style lives in one place.
+
 | Setting | Choices | What happens |
 |---|---|---|
-| Media / paper size | **Cat Tape short** (default), Cat Tape long, **Cat Minidoc A4**, Cat Minidoc Letter, custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Minidoc: the app emits a full A4/Letter page; we scale that *entire* page to 384 dots (~4.4×), trimming leftover **left/right** white only (title stays at the top, last line at the bottom). |
-| Print quality | **Default** (drawings), Text (sharp glyphs), Picture (hotter dither) | style only — dither and heat. Works on Cat Tape and Cat Minidoc. |
-| Color / tone | **Black and white** (default, fast 1-bit), Grayscale | 16-level burn only for **Picture + Grayscale** (the photo path; slower). |
-| Paper type | **Paper**, Sticker | Label only. Same heat. |
-| Copies, n-up, landscape | as usual | CUPS handles them |
+| **Paper** | **Cat Tape short** (default) · Cat Tape long · **Cat Minidoc A4** · Cat Minidoc Letter · custom 48×(25–5000) mm | Tape: trim white, fill the 384-dot head. Minidoc: the app emits a full A4/Letter page; we shrink that *entire* page to 384 dots (~4.4×), leftover **left/right** white only (title at the top, last line at the bottom). |
+| **Print style** | **Default** (drawings) · Text (sharp glyphs) · Picture (hotter dither) | Dither and heat. Works on tape *and* Minidoc. Not Draft/Normal/High. |
+| **Tone** | **Black and white** (default, fast 1-bit) · Grayscale | 16-level burn only for **Picture + Grayscale** (the photo path; slower on purpose). |
+| **Paper type** | **Paper** · Sticker | A label for kids. Same heat. |
+| Copies, n-up, landscape | as usual | CUPS already knows how. |
 
-Kids: paint → Cat Tape short + Default + Black and white. Photos → **Picture + Grayscale**. LibreOffice → **Cat Minidoc A4** (style still Text/Default/Picture).  
-Never make CatPrinter the *default* printer (homework on 48 mm tape is its own special chaos); `install.sh` warns if it is.
+| Tell it to print… | Paper | Style | Tone |
+|---|---|---|---|
+| Paint / doodles | Cat Tape short | Default | Black and white |
+| Photos / crayon | Cat Tape short | **Picture** | **Grayscale** |
+| Homework | **Cat Minidoc A4** (or Letter) | Text or Default | Black and white |
 
 The old Python-era contract is in [original-settings.md](original-settings.md).
 

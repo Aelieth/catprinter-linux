@@ -27,6 +27,7 @@ jobs:
         with:
           toolchain: "${{ steps.tc.outputs.channel }}"
           components: rustfmt, clippy
+          targets: aarch64-unknown-linux-gnu
 
       - name: Assert the toolchain
         run: rustc --version && rustc --version | grep -F " ${{ steps.tc.outputs.channel }}."
@@ -44,6 +45,11 @@ jobs:
         run: make check
         env:
           CATPRINTER_REQUIRE_IPPTOOL: "1"
+
+      # Type-check the aarch64 target on the x86 runner (no linker needed). The kit-aarch64 job
+      # builds and tests a real ARM binary on ubuntu-22.04-arm.
+      - name: clippy aarch64-unknown-linux-gnu
+        run: cargo clippy --locked --target aarch64-unknown-linux-gnu -- -D warnings
 
       - name: Build debug binary
         run: cargo build --locked
@@ -136,13 +142,60 @@ jobs:
           path: dist.tar.gz
           if-no-files-found: error
 
+  # Same glibc 2.35 floor as x86_64, native ARM so we run tests and ship a real aarch64 kit.
+  kit-aarch64:
+    name: kit aarch64 (ubuntu-22.04-arm)
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tc
+        name: Read the toolchain pin
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "${{ steps.tc.outputs.channel }}"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test + make kit
+        run: |
+          set -euo pipefail
+          cargo test --locked
+          make kit
+          v=$(make -s version)
+          echo "VERSION: $(cat dist/catprinter-kit/VERSION)"
+          test "$(cut -d' ' -f1 dist/catprinter-kit/VERSION)" = "$v"
+          test "$(dist/catprinter-kit/catprinterd --version)" = "catprinterd $v"
+          file dist/catprinter-kit/catprinterd | tee /dev/stderr | grep -qi aarch64
+          ls -la dist/ dist/catprinter-kit/
+
+      - name: Bundle aarch64 kits
+        run: tar -C dist -czf dist-aarch64.tar.gz catprinter-kit-aarch64.tar.gz catprinter-kit-*-aarch64.tar.gz SHA256SUMS
+
+      - name: Upload dist-aarch64
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-aarch64
+          path: dist-aarch64.tar.gz
+          if-no-files-found: error
+
   # Boots the kit and the image files in real systemd containers (see scripts/fleet-test.sh):
   # image-baked rebase case, kit path, kit->image migration, a print through CUPS.
   fleet-test:
-    name: fleet-test (systemd in podman)
+    name: fleet-test ${{ matrix.distro }} (systemd in podman)
     runs-on: ubuntu-latest
     needs: kit
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora, debian, arch]
+    # archlinux:latest is rolling and occasionally breaks on keyring/mirror churn — keep it
+    # informational so it never gates a release. fedora + debian are required (debian is also the
+    # systemd 252 runtime proof for catprinter.service's v254+ Restart keys).
+    continue-on-error: ${{ matrix.distro == 'arch' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -160,12 +213,12 @@ jobs:
       - name: Run the fleet test
         run: |
           podman --version
-          sudo PODMAN=podman scripts/fleet-test.sh
+          sudo FLEET_DISTRO=${{ matrix.distro }} PODMAN=podman scripts/fleet-test.sh
 
       - name: Upload fleet logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fleet-test-logs
+          name: fleet-test-logs-${{ matrix.distro }}
           path: tests/out/fleet/*.log
           if-no-files-found: ignore

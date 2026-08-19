@@ -1,6 +1,6 @@
 [package]
 name = "catprinterd"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "IPP Everywhere driver for Bluetooth cat printers (MXW01, GB0x/GT01/MX0x/YT01/X5/X6)"
@@ -41,7 +41,12 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = "1"
+
+# Mirror CI's `clippy -- -D warnings` for a plain local `cargo clippy` too. Clippy-only on purpose:
+# NOT `[lints.rust] warnings = "deny"`, which would fail `cargo build` on any warning under a distro
+# packager's non-pinned toolchain. Item-level `#[allow(...)]` still wins (priority -1).
+[lints.clippy]
+all = { level = "deny", priority = -1 }
 
 [profile.release]
 lto = "thin"

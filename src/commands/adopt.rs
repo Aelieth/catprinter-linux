@@ -222,7 +222,7 @@ async fn force_le_trusted(
         };
         match bluez::connect_device_outcome(ok, name.as_deref(), &message, timed_out) {
             bluez::ConnectDeviceOutcome::CreatedLe => {
-                let path = created.expect("CreatedLe has a path");
+                let path = bluez::created_le_path(created);
                 return trust_and_release(conn, &path).await;
             }
             bluez::ConnectDeviceOutcome::NeedExperimental => {
