@@ -49,7 +49,12 @@ jobs:
       - name: Release notes from CHANGELOG
         run: |
           set -euo pipefail
-          awk '/^## 0.3.0 /{p=1; print; next} /^## /{if(p) exit} p' CHANGELOG.md > relnotes.md
+          v="$(make -s version)"
+          awk -v ver="$v" '
+            $1=="##" && $2==ver {p=1; print; next}
+            /^## / {if (p) exit}
+            p
+          ' CHANGELOG.md > relnotes.md
           test -s relnotes.md
           cat relnotes.md
 
